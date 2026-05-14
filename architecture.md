@@ -1,0 +1,80 @@
+## ME327 Haptic Belt Requirements and Proposed Code Architecture
+This document includes the requirements for the haptic belt code and a proposed code architecture for achieving these reqs.
+
+### Requirements
+
+1. Receive incoming local frame "detections" (as if they have been detected by a device worn by the operator) via BLE from the "host computer"
+    - Determine relative threat vector. Based on relative threat vector, determine appropriate motor(s) which should be activated and their associated duty cycle(s).
+    - Update relative threat vector as operator continues to move / yaw
+2. Process incoming data from BNO085 IMU
+    - Calibration routine to align local 0 yaw to a global frame?
+3. Stream yaw back to host computer for rendering?
+4. Manage PWM signals to the 8 ERM based on detected threats.
+
+### Relevant System Details
+
+Main processor: Particle Argon with Nordic Semiconductor nRF52840 SoC
+- ARM Cortex-M4F 32-bit processor @ 64MHz
+- 1MB flash, 256KB RAM
+- Bluetooth LE (BLE) central and peripheral support
+- 20 mixed signal GPIO (6 x Analog, 8 x PWM), UART, I2C, SPI
+- Supports DSP instructions, HW accelerated Floating Point Unit (FPU) and encryption functions
+- Up to +8 dBm TX power (down to -20 dBm in 4 dB steps)
+- NFC-A radio
+- 12 PWM compatible pins, broken into three groups of four which can have different duty cycles on the same frequency
+
+IMU Fusion Breakout Board: BNO085
+- Acceleration Vector / Accelerometer
+- Angular Velocity Vector / Gyro
+- Magnetic Field Strength Vector / Magnetometer
+- Linear Acceleration Vector
+- Gravity Vector
+- Absolute Orientation/  Rotation Vector
+    - Four point quaternion output for accurate data manipulation
+- Application Optimized Rotation Vectors
+
+### Proposed Architecture
+
+#### 1. Coordinate Frames
+To ensure the belt correctly maps threats as the user turns, we define three frames:
+*   **Global Frame ($G$):** Fixed to the world (e.g., North/East/Down). 
+*   **Reference Frame ($R$):** The "Zero" orientation established at calibration or power-on.
+*   **Body Frame ($B$):** The current orientation of the belt/user.
+*   **Threat Vector ($\vec{T}$):** Received from the host as an azimuth relative to the Global or Reference frame (to be determined, we could honestly do either).
+
+#### 2. Software Modules
+
+| Module | Responsibility |
+| :--- | :--- |
+| **IMU Manager** | Interfaces with BNO08x via UART-RVC. Handles yaw zeroing (re-centering) and smoothing. |
+| **BLE Comms** | Manages the BLE peripheral. Receives threat packets (Azimuth, Intensity) and sends current Heading back to the host. |
+| **Threat Processor** | Performs the math: $Azimuth_{Relative} = Azimuth_{Target} - Heading_{Current}$. Maps the result to the nearest motor index (0-7). This module may increase in complexity when we begin handling multiple concurrent threats. |
+| **Haptic Driver** | Translates relative threat vectors into PWM signals. Exact design / haptic cue utilization still TBD. |
+
+#### 3. Data Flow
+1.  **IMU Manager** updates `current_yaw` at 100Hz based on incoming signal from IMU.
+2.  **BLE Comms** receives a `Target Azimuth` from the host.
+3.  **Threat Processor** calculates the error between `Target Azimuth` and `current_yaw`.
+4.  **Haptic Driver** selects the motor closest to the error angle and fires a burst. Might need some additional abstraction if utilizing more complex haptic cues.
+5.  (Optional) **BLE Comms** sends `current_yaw` to host for 2D visualization/sync.
+
+#### 4. Interfaces (Abstractions)
+
+```cpp
+// IMU Interface
+float getHeading();       // Returns 0-360 relative to reference
+void setReference();      // Zeros the current yaw
+
+// Comms Interface
+void onThreatReceived(float azimuth, float intensity);
+void sendTelemetry(float currentYaw);
+
+// Haptic Interface
+void triggerMotor(int motorIndex, float intensity);
+void stopAll();
+```
+
+### Proposed Hardware Mapping (Argon)
+*   **IMU (UART1):** RX -> D10/RX, TX -> D9/TX (using hardware Serial1)
+*   **Motors (PWM):** Using 8 pins from the D2-D8 and A0-A5 pool. (e.g., D2, D3, D4, D5, D6, D7, D8, A0)
+*   **Status LED:** On-board D7 (avoiding using D7 for motors if using onboard LED for status)

@@ -1,0 +1,18 @@
+!! Appendix: Project Checkpoints
+
+!!! Checkpoint 1
+
+In Checkpoint 1, we successfully established ..., ..., the hardware communication backbone and the core state estimation logic. 
+
+'''Goals Met:'''
+*   '''IMU Integration:''' Identified the BNO08x as the optimal sensor and selected the **UART-RVC** protocol to ensure robust 100Hz orientation data without the I2C "clock stretching" issues common to the ESP32/nRF52840 families.
+*   '''Software Architecture:''' Designed a modular controller that abstracts the IMU, BLE, and Haptic drivers, allowing for parallel development.
+*   '''State Estimation & Mapping:''' Implemented the core logic to normalize absolute IMU yaw into a relative reference frame and map threat azimuths to the 8-motor array.
+*   '''Hardware Mapping:''' Finalized the pin assignments for the Particle Argon, ensuring all 8 motors are on dedicated hardware PWM pins.
+
+'''Challenges:''' One challenge discovered was an I2C bug present with the nRF52840 (in our selected controller). Fortunately, the selected IMU supports UART-RVC, which actually simplified our code and increased system stability.
+
+'''Updated Plans:''' We have decided to focus on a combination of global and local calibrated frames (by zeroing the belt) to ensure that the haptic cues are intuitive even if the belt is put on slightly crooked. This will also allow us to send threats from the host in a global frame, then map these to the local frame.
+
+%width=250px% Attach:CoordinateFrames.png 
+Caption: Diagram of Global vs. Body frame mapping logic (TODO).
