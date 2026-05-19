@@ -3,7 +3,7 @@
 # The user can click to set the threat location and use the A/D keys to rotate their heading.
 # This script only supports a single threat.
 
-# runs on python 3.11 with pygame, pyserial, numpy, scipy, filterpy, bleak installed.
+# runs on python 3.11 with pygame, pyserial, numpy, scipy, filterpy, bleak, bluetooth, bluez, bluez-tools
 
 import pygame
 import math
@@ -11,7 +11,7 @@ import math
 import time
 # BT imports
 import asyncio
-from bleak import BleakClient
+from bleak import BleakClient, BleakScanner
 import threading
 
 # ------------------
@@ -36,6 +36,7 @@ SECTOR_SIZE = 360 / NUM_MOTORS
 # ser = serial.Serial("/dev/ttyUSB0", 115200)
 
 # For BLE
+BLE_ADDRESS = "e8:9f:6d:f2:2c:08"   # MAC address of the Particle Argon
 # BLE_ADDRESS = "XX:XX:XX:XX:XX:XX"  # replace with device's MAC address
 # BLE_CHARACTERISTIC_UUID = "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX"  # replace with characteristic UUID
 
@@ -98,6 +99,17 @@ def handle_ble_data(sender, data):
     except:
         pass
 
+async def scan_for_devices():
+
+    print("Scanning for BLE devices...")
+
+    devices = await BleakScanner.discover(timeout=5.0)
+
+    print("\nFound devices:")
+
+    for d in devices:
+        print(f"Name: {d.name}, Address: {d.address}")
+
 async def ble_loop():
     global latest_heading
 
@@ -111,10 +123,20 @@ async def ble_loop():
 
 # running in a background thread
 def start_ble():
-    asyncio.run(ble_loop())
 
-ble_thread = threading.Thread(target=start_ble, daemon=True)
-ble_thread.start()
+    async def runner():
+
+        await scan_for_devices()
+
+        # STOP HERE for now
+        # later you will connect
+
+    asyncio.run(runner())
+
+# ble_thread = threading.Thread(target=start_ble, daemon=True)
+# ble_thread.start()
+
+start_ble()
 
 running = True
 
