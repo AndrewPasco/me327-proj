@@ -1,7 +1,7 @@
 # written by Ashlynn as the start of the GUI for the project. 
 # This is a simple visualization of the user's heading and the threat location, and it sends motor commands based on the relative angle between the user and the threat. 
 # The user can click to set the threat location and use the A/D keys to rotate their heading.
-# This script only supports a single threat.
+# This script supports multiple threats and enables dragging and dropping of the threats.
 
 # runs on python 3.11 with pygame, pyserial, numpy, scipy, filterpy, bleak, bluetooth, bluez, bluez-tools installed.
 
@@ -9,9 +9,9 @@ import pygame
 import math
 # import serial
 import time
+from collections import defaultdict
 # BT imports
 import asyncio
-import struct
 from bleak import BleakScanner, BleakClient
 import threading
 
@@ -24,8 +24,8 @@ HEIGHT = 800
 
 CENTER = (WIDTH // 2, HEIGHT // 2)
 
-THREAT_X = 500
-THREAT_Y = 300
+THREATS = []
+drag_index = None
 
 latest_heading = 0
 user_heading_deg = 0
@@ -40,16 +40,7 @@ SECTOR_SIZE = 360 / NUM_MOTORS
 # For BLE
 # this is the info for the particle argon
 BLE_ADDRESS = None     # this can change periodically so we scan for it
-BLE_CHARACTERISTIC_UUID = "62c3cf89-247b-4c0f-a70d-651080844608"  # TX (Notify) — belt → host telemetry
-
-# RX UUID for writing threat data TO the belt.
-# Threat message format: binary struct, 9 bytes, little-endian
-#   struct.pack('<Bff', threat_id, bearing_deg, range)
-# Semantics:
-#   - New ID       → added to threat list on belt
-#   - Existing ID  → updates bearing/range
-#   - range == 0.0 → removes threat from belt
-BLE_RX_UUID = "62c3cf89-247b-4c0f-a70d-651080844607"
+BLE_CHARACTERISTIC_UUID = "62c3cf89-247b-4c0f-a70d-651080844608"
 
 pygame.init()
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
@@ -59,38 +50,58 @@ clock = pygame.time.Clock()
 def normalize_angle(angle):
     return angle % 360
 
-
-def get_relative_angle():
-
-    dx = THREAT_X - CENTER[0]
-    dy = CENTER[1] - THREAT_Y
-
-    world_angle = math.degrees(
-        math.atan2(dx, dy)
-    )
-
-    relative = normalize_angle(
-        world_angle - user_heading_deg
-    )
-
-    return relative
-
-
 def angle_to_motor(angle):
-
     sector = round(
         angle / SECTOR_SIZE
     ) % NUM_MOTORS
 
     return sector
 
-def send_motor_command(motor_id):
+def compute_motor_votes(threats):
+    "If there are multiple threats, this function computes "
+    "how many threats fall into each motor's sector, allowing for multiple motors to activate simultaneously if there are multiple threats in different directions. "
+    "It also weights the votes based on the distance to the threat, so closer threats have a stronger influence on the motor activation."
+    votes = [0.0] * NUM_MOTORS
 
-    msg = f"{motor_id}\n"
+    for (tx, ty) in threats:
 
-    print("TX:", msg.strip())
+        dx = tx - CENTER[0]
+        dy = ty - CENTER[1]
 
-    # Uncomment when hardware ready
+        dist = math.sqrt(dx*dx + dy*dy)
+
+        # avoid division by zero
+        weight = 1.0 / (dist + 1e-6)
+
+        world_angle = math.degrees(math.atan2(dx, dy))
+        relative = normalize_angle(world_angle - user_heading_deg)
+
+        motor = angle_to_motor(relative)
+
+        votes[motor] += weight
+
+    return votes
+
+def send_motor_command(votes):
+    max_v = max(votes, default=0.0)
+
+    if max_v == 0:
+        print("TX: no active threats\n")
+        return
+
+    normalized = [v / max_v for v in votes]
+
+    active = [
+        f"{i}:{normalized[i]:.2f}"
+        for i in range(len(normalized))
+        if normalized[i] > 0.05
+    ]
+
+    msg = ",".join(active) + "\n"
+
+    print("TX:", msg)
+
+    # added for hardware testing - sends all active motors in one message, separated by commas. For example, if motors 0, 3, and 5 are active, it sends "0,3,5\n"
     # ser.write(msg.encode())
 
 def handle_ble_data(sender, data):
@@ -163,7 +174,29 @@ while running:
             running = False
 
         if event.type == pygame.MOUSEBUTTONDOWN:
-            THREAT_X, THREAT_Y = event.pos
+
+            if event.button == 1:
+
+                # check if clicking near existing threat first
+                mx, my = event.pos
+
+                for i, (tx, ty) in enumerate(THREATS):
+                    dist = math.hypot(tx - mx, ty - my)
+
+                    if dist < 15:   # click radius
+                        drag_index = i
+                        break
+                else:
+                    # no hit → create new threat
+                    THREATS.append([mx, my])
+
+        if event.type == pygame.MOUSEBUTTONUP:
+            if event.button == 1:
+                drag_index = None
+
+        if event.type == pygame.MOUSEMOTION:
+            if drag_index is not None:
+                THREATS[drag_index][0], THREATS[drag_index][1] = event.pos
 
     # replace the keyboard with the following line to use BLE heading instead of keyboard input
     # with heading_lock:
@@ -179,13 +212,8 @@ while running:
         user_heading_deg -= 2
     # ----------- KEYBOARD ----------
 
-    relative_angle = get_relative_angle()
-
-    motor = angle_to_motor(
-        relative_angle
-    )
-
-    send_motor_command(motor)
+    votes = compute_motor_votes(THREATS)
+    send_motor_command(votes)
 
     # ------------------
     # DRAW
@@ -223,12 +251,8 @@ while running:
     )
 
     # threat
-    pygame.draw.circle(
-        screen,
-        (255,0,0),
-        (THREAT_X, THREAT_Y),
-        10
-    )
+    for (tx, ty) in THREATS:
+        pygame.draw.circle(screen, (255,0,0), (tx, ty), 10)
 
     pygame.display.flip()
 

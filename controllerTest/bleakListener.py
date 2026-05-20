@@ -27,7 +27,7 @@ async def main(address):
     # async with BleakScanner(callback) as scanner:
     #     await asyncio.sleep(30.0)
 
-    async with BleakClient(DEVICE_UUID) as client:
+    async with BleakClient(DEVICE_ADDRESS) as client: # instead of DEVICE_UUID
         print(f"Connected: {client.is_connected}")
 
         # 3. Start listening (subscribing to notifications)
@@ -50,6 +50,3 @@ if __name__ == "__main__":
     # Replace with your device's MAC address or UUID
     DEVICE_ADDRESS = "EF:6C:92:99:B5:79" 
     asyncio.run(main(DEVICE_ADDRESS))
-
-
-
