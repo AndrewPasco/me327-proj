@@ -11,6 +11,7 @@ import math
 import time
 # BT imports
 import asyncio
+import struct
 from bleak import BleakScanner, BleakClient
 import threading
 
@@ -39,7 +40,16 @@ SECTOR_SIZE = 360 / NUM_MOTORS
 # For BLE
 # this is the info for the particle argon
 BLE_ADDRESS = None     # this can change periodically so we scan for it
-BLE_CHARACTERISTIC_UUID = "62c3cf89-247b-4c0f-a70d-651080844608"
+BLE_CHARACTERISTIC_UUID = "62c3cf89-247b-4c0f-a70d-651080844608"  # TX (Notify) — belt → host telemetry
+
+# RX UUID for writing threat data TO the belt.
+# Threat message format: binary struct, 9 bytes, little-endian
+#   struct.pack('<Bff', threat_id, bearing_deg, range)
+# Semantics:
+#   - New ID       → added to threat list on belt
+#   - Existing ID  → updates bearing/range
+#   - range == 0.0 → removes threat from belt
+BLE_RX_UUID = "62c3cf89-247b-4c0f-a70d-651080844607"
 
 pygame.init()
 screen = pygame.display.set_mode((WIDTH, HEIGHT))

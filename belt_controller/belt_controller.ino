@@ -1,6 +1,67 @@
+#include "Particle.h"
 #include "Adafruit_BNO08x_RVC.h"
 #include "ThreatManager.h"
 
+// --- System Configuration ---
+// MANUAL mode: no WiFi/Cloud, BLE only: faster boot, lower power
+SYSTEM_MODE(MANUAL);
+// BLE callbacks run on a separate OS thread; shared state must be mutex-protected
+SYSTEM_THREAD(ENABLED);
+
+// Thread-safe logging (Serial.print is NOT safe with SYSTEM_THREAD)
+SerialLogHandler logHandler(LOG_LEVEL_INFO);
+
+// --- BLE Configuration ---
+// Service UUID (unchanged from controllerTest for Python compatibility)
+BleUuid beltServiceUuid("62c3cf89-247b-4c0f-a70d-651080844609");
+// RX UUID:
+BleUuid threatRxUuid("62c3cf89-247b-4c0f-a70d-651080844607");
+// TX UUID (unchanged from controllerTest for Python compatibility)
+BleUuid telemetryTxUuid("62c3cf89-247b-4c0f-a70d-651080844608");
+
+// Forward-declare BLE callback
+void onBleDataReceived(const uint8_t* data, size_t len,
+    const BlePeerDevice& peer, void* context);
+
+// TX: Belt → Host telemetry (NOTIFY)
+BleCharacteristic telemetryChar("Telemetry",
+    BleCharacteristicProperty::NOTIFY, telemetryTxUuid, beltServiceUuid);
+
+// RX: Host → Belt threat messages (WRITE_WO_RSP)
+BleCharacteristic threatRxChar("ThreatRx",
+    BleCharacteristicProperty::WRITE_WO_RSP, threatRxUuid, beltServiceUuid,
+    onBleDataReceived, NULL);
+
+// --- BLE Thread-Safe Shared State ---
+
+/**
+ * Binary message format for incoming threats over BLE.
+ * 9 bytes, packed, little-endian.
+ *
+ * Python packing:  struct.pack('<Bff', id, bearing, range)
+ *
+ * Semantics:
+ *   - New ID       → add to threat list
+ *   - Existing ID  → update bearing/range
+ *   - range == 0.0 → remove threat
+ *
+ * One message per BLE write. For multiple threats, the host sends
+ * successive writes (handled on the Python side).
+ */
+struct __attribute__((packed)) ThreatMessage {
+    uint8_t id;
+    float bearing;
+    float range;
+};
+
+// Ring buffer: BLE thread produces, loop() consumes
+const int PENDING_BUFFER_SIZE = 8;
+volatile int pendingWriteIdx = 0;
+volatile int pendingReadIdx = 0;
+ThreatMessage pendingThreats[PENDING_BUFFER_SIZE];
+Mutex threatMutex;
+
+// --- IMU ---
 Adafruit_BNO08x_RVC rvc = Adafruit_BNO08x_RVC();
 
 // --- Configuration ---
@@ -33,7 +94,37 @@ const int motorPins[MOTOR_COUNT] = {
   D8  // Motor 7: Front-Left (315 deg)
 };
 
-// --- Motor Logic ---
+// =============================================================================
+// BLE Callback (runs on BLE OS thread — keep minimal and non-blocking!)
+// =============================================================================
+
+/**
+ * Called by the BLE stack when the host writes to the ThreatRx characteristic.
+ * Copies the raw bytes into the ring buffer and returns immediately.
+ * All parsing, threat management, and logging happens in loop().
+ *
+ * IMPORTANT: Do NOT call Serial.print, Particle.publish, or any blocking
+ * function from this callback. Use Log.trace at most for lightweight debug.
+ */
+void onBleDataReceived(const uint8_t* data, size_t len,
+    const BlePeerDevice& peer, void* context)
+{
+  // Validate message size — expect exactly one ThreatMessage per write
+  if (len != sizeof(ThreatMessage)) return;
+
+  WITH_LOCK(threatMutex) {
+    int nextWrite = (pendingWriteIdx + 1) % PENDING_BUFFER_SIZE;
+    if (nextWrite != pendingReadIdx) { // Buffer not full
+      memcpy(&pendingThreats[pendingWriteIdx], data, sizeof(ThreatMessage));
+      pendingWriteIdx = nextWrite;
+    }
+    // If buffer is full, silently drop (non-blocking, no allocation)
+  }
+}
+
+// =============================================================================
+// Motor Logic
+// =============================================================================
 
 /**
  * Triggers a specific motor with a given intensity.
@@ -58,13 +149,27 @@ void stopAllMotors() {
   }
 }
 
+// =============================================================================
+// Telemetry
+// =============================================================================
+
+/**
+ * Sends a telemetry update to the host over BLE (NOTIFY characteristic).
+ * Format: "YAW,<heading>,IMU,<0|1>"
+ *   - YAW: relative heading in degrees (float, 2 decimal places)
+ *   - IMU: 1 if IMU is connected, 0 otherwise
+ */
 void sendTelemetry(float relativeYaw) {
-  // Placeholder: Send data over BLE to the host computer
-  Serial.print("Telemetry -> Relative Yaw: ");
-  Serial.println(relativeYaw);
+  char buf[48];
+  snprintf(buf, sizeof(buf), "YAW,%.2f,IMU,%d",
+           relativeYaw, imuConnected ? 1 : 0);
+  telemetryChar.setValue(buf);
+  Log.trace("Telemetry -> %s", buf);
 }
 
-// --- Core Logic ---
+// =============================================================================
+// Core Logic
+// =============================================================================
 
 // Normalizes an angle to the [0, 360) range
 float normalizeAngle(float angle) {
@@ -78,8 +183,7 @@ float normalizeAngle(float angle) {
 // Zeros the heading to the current physical orientation
 void setReference() {
   referenceYaw = currentYawRaw;
-  Serial.print("Reference set to: ");
-  Serial.println(referenceYaw);
+  Log.info("Reference set to: %.2f", referenceYaw);
 }
 
 // Returns the heading relative to the set reference
@@ -87,12 +191,26 @@ float getHeading() {
   return normalizeAngle(currentYawRaw - referenceYaw);
 }
 
-// Simulated BLE Callback: Processes a threat received from the host
-void onThreatReceived(uint8_t id, float targetAzimuth, float range) {
-  threatManager.addOrUpdateThreat(id, targetAzimuth, range);
-  Serial.print("Threat received/updated - ID: "); Serial.print(id);
-  Serial.print(" | Azimuth: "); Serial.print(targetAzimuth);
-  Serial.print(" | Range: "); Serial.println(range);
+/**
+ * Drains the ring buffer of pending threat messages from BLE.
+ * Called from loop() — safe to do heavy work here (logging, ThreatManager updates).
+ */
+void processPendingThreats() {
+  WITH_LOCK(threatMutex) {
+    while (pendingReadIdx != pendingWriteIdx) {
+      ThreatMessage msg = pendingThreats[pendingReadIdx];
+      pendingReadIdx = (pendingReadIdx + 1) % PENDING_BUFFER_SIZE;
+
+      if (msg.range == 0.0f) {
+        threatManager.removeThreat(msg.id);
+        Log.info("Threat removed - ID: %d", msg.id);
+      } else {
+        threatManager.addOrUpdateThreat(msg.id, msg.bearing, msg.range);
+        Log.info("Threat updated - ID: %d, Az: %.1f, Range: %.1f",
+                 msg.id, msg.bearing, msg.range);
+      }
+    }
+  }
 }
 
 // Haptic Renderer: determines motor activations based on active threats and current yaw
@@ -133,7 +251,9 @@ void renderHaptics() {
   }
 }
 
-// --- Setup and Loop ---
+// =============================================================================
+// Setup and Loop
+// =============================================================================
 
 void setup() {
   Serial.begin(115200);
@@ -141,17 +261,18 @@ void setup() {
   // Start hardware serial for BNO08x (Board RX to BNO085 SDA)
   Serial1.begin(115200); 
 
-  Serial.println("Haptic Belt - State Estimation Init");
+  Log.info("Haptic Belt - BLE + State Estimation Init");
 
+  // --- IMU Init ---
   if (!rvc.begin(&Serial1)) { 
-    Serial.println("WARNING: Could not find BNO08x at startup!");
+    Log.warn("Could not find BNO08x at startup!");
     // We don't block here. We let the loop handle reconnection/timeouts.
   } else {
-    Serial.println("BNO08x initialized.");
+    Log.info("BNO08x initialized.");
     imuConnected = true;
   }
 
-  // Initialize motors
+  // --- Motor Init ---
   for (int i = 0; i < MOTOR_COUNT; i++) {
     pinMode(motorPins[i], OUTPUT);
   }
@@ -162,45 +283,59 @@ void setup() {
   analogWrite(motorPins[4], 0, PWM_FREQUENCY); // Sets frequency for Group D4, D5, D6, D8
 
   stopAllMotors();
+
+  // --- BLE Init ---
+  // In MANUAL mode, we must explicitly enable BLE
+  BLE.on();
+
+  BLE.addCharacteristic(telemetryChar);
+  BLE.addCharacteristic(threatRxChar);
+
+  BleAdvertisingData advData;
+  advData.appendServiceUUID(beltServiceUuid);
+  BLE.setDeviceName("Argon Test"); // Keep existing name for now
+  BLE.advertise(&advData);
+
+  Log.info("BLE advertising started (Service: %s)", 
+           beltServiceUuid.toString().c_str());
 }
 
 void loop() {
   unsigned long currentMillis = millis();
 
-  // Process IMU Data (Non-blocking)
+  // --- Process IMU Data (Non-blocking) ---
   BNO08x_RVC_Data headingData;
   if (rvc.read(&headingData)) {
     currentYawRaw = headingData.yaw;
     lastImuUpdate = currentMillis;
     if (!imuConnected) {
-      Serial.println("IMU Connection Recovered!");
+      Log.info("IMU Connection Recovered!");
       imuConnected = true;
     }
   }
 
-  // Check IMU Health
+  // --- Check IMU Health ---
   if (imuConnected && (currentMillis - lastImuUpdate > IMU_TIMEOUT_MS)) {
-    Serial.println("ERROR: IMU Data Timeout! Lost connection.");
+    Log.error("IMU Data Timeout! Lost connection.");
     imuConnected = false;
     stopAllMotors(); // Safety: stop haptics if we lose orientation
   }
 
-  // Simulated Host Input (Replace with actual BLE loop when ready)
+  // --- Process incoming BLE threat messages ---
+  processPendingThreats();
+
+  // --- Serial debug commands (keep for development) ---
   if (Serial.available() > 0) {
     char cmd = Serial.read();
     if (cmd == 'c') { // Type 'c' in serial to calibrate/zero
       setReference();
-    } else if (cmd == 't') { // Type 't' to simulate a threat
-      onThreatReceived(1, 90.0, 1.0); // Threat ID 1, at 90 deg, max intensity
-    } else if (cmd == 'r') {
-      threatManager.removeThreat(1);
     }
   }
 
-  // Update Haptics based on state
+  // --- Update Haptics based on state ---
   renderHaptics();
 
-  // Send Telemetry
+  // --- Send Telemetry ---
   if (currentMillis - lastTelemetrySend > TELEMETRY_INTERVAL_MS) {
     if (imuConnected) {
       sendTelemetry(getHeading());
