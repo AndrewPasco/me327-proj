@@ -33,6 +33,18 @@ BleCharacteristic threatRxChar("ThreatRx",
     onBleDataReceived, NULL);
 
 // --- BLE Thread-Safe Shared State ---
+//
+// DESIGN NOTE: We use global state here rather than the class-based callback
+// pattern (MainClass → BleHandler → CallbackClass with void* context cast)
+// documented in "Haptics Particle Argon Notes.md". Since
+// belt_controller.ino is a flat .ino with no classes, the ring buffer and
+// mutex are already in scope for the free-function callback — no context
+// pointer needed (we pass NULL). If this grows to warrant encapsulation
+// refactor by:
+//   1. Wrapping the ring buffer + mutex in a class (e.g., ThreatReceiver)
+//   2. Making onBleDataReceived a static member
+//   3. Passing `this` as the void* context in the characteristic constructor
+//   4. Casting context back to ThreatReceiver* inside the callback
 
 /**
  * Binary message format for incoming threats over BLE.
