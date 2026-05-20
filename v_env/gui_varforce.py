@@ -1,9 +1,9 @@
 # written by Ashlynn as the start of the GUI for the project. 
 # This is a simple visualization of the user's heading and the threat location, and it sends motor commands based on the relative angle between the user and the threat. 
-# The user can left click to set the threat location and use the A/D keys to rotate their heading. Use right click to clear all threats.
-# This script supports multiple threats and variable force based on the distance to the threat.
+# The user can click to set the threat location and use the A/D keys to rotate their heading.
+# This script only supports a single threat.
 
-# runs on python 3.11 with pygame, pyserial, numpy, scipy, filterpy, bleak installed.
+# runs on python 3.11 with pygame, pyserial, numpy, scipy, filterpy, bleak, bluetooth, bluez, bluez-tools installed.
 
 import pygame
 import math
@@ -12,7 +12,7 @@ import time
 from collections import defaultdict
 # BT imports
 import asyncio
-from bleak import BleakClient
+from bleak import BleakScanner, BleakClient
 import threading
 
 # ------------------
@@ -26,8 +26,9 @@ CENTER = (WIDTH // 2, HEIGHT // 2)
 
 THREATS = []
 
-user_heading_deg = 0
 latest_heading = 0
+user_heading_deg = 0
+heading_lock = threading.Lock()
 
 NUM_MOTORS = 8
 SECTOR_SIZE = 360 / NUM_MOTORS
@@ -36,18 +37,19 @@ SECTOR_SIZE = 360 / NUM_MOTORS
 # ser = serial.Serial("/dev/ttyUSB0", 115200)
 
 # For BLE
-# BLE_ADDRESS = "XX:XX:XX:XX:XX:XX"  # replace with device's MAC address
-# BLE_CHARACTERISTIC_UUID = "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX"  # replace with characteristic UUID
+# this is the info for the particle argon
+BLE_ADDRESS = None     # this can change periodically so we scan for it
+BLE_CHARACTERISTIC_UUID = "62c3cf89-247b-4c0f-a70d-651080844608"
 
 pygame.init()
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
 clock = pygame.time.Clock()
 
+
 def normalize_angle(angle):
     return angle % 360
 
 def angle_to_motor(angle):
-
     sector = round(
         angle / SECTOR_SIZE
     ) % NUM_MOTORS
@@ -107,33 +109,59 @@ def handle_ble_data(sender, data):
     try:
         msg = data.decode().strip()
 
-        # assumes "YAW,127.4" is what the BLE device sends, where 127.4 is the heading in degrees
         if "YAW" in msg:
-            latest_heading = float(msg.split(",")[1])
-
+            value = float(msg.split(",")[1])
         else:
-            latest_heading = float(msg)
+            value = float(msg)
+
+        # thread-safe update
+        with heading_lock:
+            latest_heading = value
 
     except:
         pass
 
 async def ble_loop():
-    global latest_heading
+    global BLE_ADDRESS
+
+    print("Scanning for Argon...")
+
+    devices = await BleakScanner.discover(timeout=10.0)
+
+    for d in devices:
+        print(f"{d.name} | {d.address}")
+
+        if d.name and "Argon" in d.name:
+            BLE_ADDRESS = d.address
+            break
+
+    if BLE_ADDRESS is None:
+        print("Argon not found.")
+        return
+
+    print(f"Connecting to {BLE_ADDRESS}")
 
     async with BleakClient(BLE_ADDRESS) as client:
-        print("Connected to IMU BLE")
 
-        await client.start_notify(BLE_CHARACTERISTIC_UUID, handle_ble_data)
+        print("Connected to BLE device")
+
+        await client.start_notify(
+            BLE_CHARACTERISTIC_UUID,
+            handle_ble_data
+        )
 
         while True:
-            await asyncio.sleep(0.01)
+            await asyncio.sleep(0.1)
 
 # running in a background thread
 def start_ble():
-    asyncio.run(ble_loop())
-# uncomment when using the BLE functionality
-# ble_thread = threading.Thread(target=start_ble, daemon=True)
-# ble_thread.start()
+    try:
+        asyncio.run(ble_loop())
+    except Exception as e:
+        print("BLE THREAD CRASHED:", e)
+
+ble_thread = threading.Thread(target=start_ble, daemon=True)
+ble_thread.start()
 
 running = True
 
@@ -150,8 +178,9 @@ while running:
             if event.button == 3:  # right click to clear threats
                 THREATS.clear()
 
-    # replace the keys with the following line to use BLE heading instead of keyboard input
-    # user_heading_deg = latest_heading
+    # replace the keyboard with the following line to use BLE heading instead of keyboard input
+    # with heading_lock:
+    #     user_heading_deg = latest_heading
 
     # ------- KEYBOARD ------------
     keys = pygame.key.get_pressed()
