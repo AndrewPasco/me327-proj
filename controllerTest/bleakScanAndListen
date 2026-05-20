@@ -1,0 +1,54 @@
+# scans for particle argon, finds its MAC address then uses that address to listen to messages it' broadcasting
+
+import asyncio
+from bleak import BleakClient, BleakScanner
+
+CHARACTERISTIC_UUID = "62c3cf89-247b-4c0f-a70d-651080844608"
+
+def notification_handler(characteristic, data):
+
+    msg = data.decode("utf-8").strip()
+
+    print("Received:", msg)
+
+async def main():
+
+    print("Scanning for Argon...")
+
+    devices = await BleakScanner.discover(timeout=10.0)
+
+    argon_device = None
+
+    for d in devices:
+
+        print(f"Found: {d.name} | {d.address}")
+
+        if d.name and "Argon" in d.name:
+            argon_device = d
+            break
+
+    if argon_device is None:
+        print("Argon not found.")
+        return
+
+    print(f"\nConnecting to {argon_device.name}")
+    print(f"Address: {argon_device.address}")
+
+    async with BleakClient(argon_device) as client:
+
+        print("Connected:", client.is_connected)
+
+        await client.start_notify(
+            CHARACTERISTIC_UUID,
+            notification_handler
+        )
+
+        print("Listening for 30 seconds...")
+
+        await asyncio.sleep(30)
+
+        await client.stop_notify(
+            CHARACTERISTIC_UUID
+        )
+
+asyncio.run(main())
