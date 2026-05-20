@@ -5,7 +5,7 @@ from bleak import BleakScanner
 DEVICE_UUID = "33626148-5969-F52D-B23E-A3540B156C24"
 
 # The UUID of the characteristic you want to monitor
-CHARACTERISTIC_UUID = "62c3cf89-247b-4c0f-a70d-651080844608" # Example: Heart Rate
+CHARACTERISTIC_UUID = "62c3cf89-247b-4c0f-a70d-651080844608" 
 
 # 1. Define the callback function that "hears" the data
 def notification_handler(characteristic, data):
@@ -23,7 +23,7 @@ async def main(address):
     # async with BleakScanner(callback) as scanner:
     #     await asyncio.sleep(30.0)
 
-    async with BleakClient(DEVICE_UUID) as client:
+    async with BleakClient(DEVICE_ADDRESS) as client: # instead of DEVICE_UUID
         print(f"Connected: {client.is_connected}")
 
         # 3. Start listening (subscribing to notifications)
@@ -44,8 +44,5 @@ def callback(device, advertising_data):
 
 if __name__ == "__main__":
     # Replace with your device's MAC address or UUID
-    DEVICE_ADDRESS = "e8:9f:6d:f2:2c:08" 
+    DEVICE_ADDRESS = "EF:6C:92:99:B5:79" 
     asyncio.run(main(DEVICE_ADDRESS))
-
-
-
