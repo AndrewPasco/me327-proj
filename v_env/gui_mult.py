@@ -3,15 +3,16 @@
 # The user can click to set the threat location and use the A/D keys to rotate their heading.
 # This script only supports a single threat.
 
-# runs on python 3.11 with pygame, pyserial, numpy, scipy, filterpy, bleak installed.
+# runs on python 3.11 with pygame, pyserial, numpy, scipy, filterpy, bleak, bluetooth, bluez, bluez-tools installed.
 
 import pygame
 import math
 # import serial
 import time
+from collections import defaultdict
 # BT imports
 import asyncio
-from bleak import BleakClient
+from bleak import BleakScanner, BleakClient
 import threading
 
 # ------------------
@@ -23,11 +24,11 @@ HEIGHT = 800
 
 CENTER = (WIDTH // 2, HEIGHT // 2)
 
-THREAT_X = 500
-THREAT_Y = 300
+THREATS = []
 
-user_heading_deg = 0
 latest_heading = 0
+user_heading_deg = 0
+heading_lock = threading.Lock()
 
 NUM_MOTORS = 8
 SECTOR_SIZE = 360 / NUM_MOTORS
@@ -36,8 +37,9 @@ SECTOR_SIZE = 360 / NUM_MOTORS
 # ser = serial.Serial("/dev/ttyUSB0", 115200)
 
 # For BLE
-# BLE_ADDRESS = "XX:XX:XX:XX:XX:XX"  # replace with device's MAC address
-# BLE_CHARACTERISTIC_UUID = "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX"  # replace with characteristic UUID
+# this is the info for the particle argon
+BLE_ADDRESS = None     # this can change periodically so we scan for it
+BLE_CHARACTERISTIC_UUID = "62c3cf89-247b-4c0f-a70d-651080844608"
 
 pygame.init()
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
@@ -48,20 +50,21 @@ def normalize_angle(angle):
     return angle % 360
 
 
-def get_relative_angle():
+def get_threat_angles():
+    angles = []
 
-    dx = THREAT_X - CENTER[0]
-    dy = CENTER[1] - THREAT_Y
+    for (tx, ty) in THREATS:
 
-    world_angle = math.degrees(
-        math.atan2(dx, dy)
-    )
+        dx = tx - CENTER[0]
+        dy = CENTER[1] - ty
 
-    relative = normalize_angle(
-        world_angle - user_heading_deg
-    )
+        world_angle = math.degrees(math.atan2(dx, dy))
 
-    return relative
+        relative = normalize_angle(world_angle - user_heading_deg)
+
+        angles.append(relative)
+
+    return angles
 
 
 def angle_to_motor(angle):
@@ -72,14 +75,26 @@ def angle_to_motor(angle):
 
     return sector
 
+def compute_motor_votes(threat_angles):
+    "If there are multiple threats, this function computes how many threats fall into each motor's sector, allowing for multiple motors to activate simultaneously if there are multiple threats in different directions."
+    votes = [0] * NUM_MOTORS
+
+    for angle in threat_angles:
+        motor = angle_to_motor(angle)
+        votes[motor] += 1
+
+    return votes
 
 def send_motor_command(motor_id):
+    "Allows multiple motors to activate at the same time."
 
-    msg = f"{motor_id}\n"
+    active = [str(i) for i, v in enumerate(votes) if v > 0]
 
-    print("TX:", msg.strip())
+    msg = ",".join(active) + "\n"
 
-    # Uncomment when hardware ready
+    print("TX:", msg)
+
+    # added for hardware testing - sends all active motors in one message, separated by commas. For example, if motors 0, 3, and 5 are active, it sends "0,3,5\n"
     # ser.write(msg.encode())
 
 def handle_ble_data(sender, data):
@@ -88,30 +103,56 @@ def handle_ble_data(sender, data):
     try:
         msg = data.decode().strip()
 
-        # assumes "YAW,127.4" is what the BLE device sends, where 127.4 is the heading in degrees
         if "YAW" in msg:
-            latest_heading = float(msg.split(",")[1])
-
+            value = float(msg.split(",")[1])
         else:
-            latest_heading = float(msg)
+            value = float(msg)
+
+        # thread-safe update
+        with heading_lock:
+            latest_heading = value
 
     except:
         pass
 
 async def ble_loop():
-    global latest_heading
+    global BLE_ADDRESS
+
+    print("Scanning for Argon...")
+
+    devices = await BleakScanner.discover(timeout=10.0)
+
+    for d in devices:
+        print(f"{d.name} | {d.address}")
+
+        if d.name and "Argon" in d.name:
+            BLE_ADDRESS = d.address
+            break
+
+    if BLE_ADDRESS is None:
+        print("Argon not found.")
+        return
+
+    print(f"Connecting to {BLE_ADDRESS}")
 
     async with BleakClient(BLE_ADDRESS) as client:
-        print("Connected to IMU BLE")
 
-        await client.start_notify(BLE_CHARACTERISTIC_UUID, handle_ble_data)
+        print("Connected to BLE device")
+
+        await client.start_notify(
+            BLE_CHARACTERISTIC_UUID,
+            handle_ble_data
+        )
 
         while True:
-            await asyncio.sleep(0.01)
+            await asyncio.sleep(0.1)
 
 # running in a background thread
 def start_ble():
-    asyncio.run(ble_loop())
+    try:
+        asyncio.run(ble_loop())
+    except Exception as e:
+        print("BLE THREAD CRASHED:", e)
 
 ble_thread = threading.Thread(target=start_ble, daemon=True)
 ble_thread.start()
@@ -126,11 +167,14 @@ while running:
             running = False
 
         if event.type == pygame.MOUSEBUTTONDOWN:
+            if event.button == 1:  # left click to add threat   
+                THREATS.append(list(event.pos))
+            if event.button == 3:  # right click to clear threats
+                THREATS.clear()
 
-            THREAT_X, THREAT_Y = event.pos
-
-    # replace the keys with the following line to use BLE heading instead of keyboard input
-    # user_heading_deg = latest_heading
+    # replace the keyboard with the following line to use BLE heading instead of keyboard input
+    # with heading_lock:
+    #     user_heading_deg = latest_heading
 
     # ------- KEYBOARD ------------
     keys = pygame.key.get_pressed()
@@ -142,13 +186,9 @@ while running:
         user_heading_deg -= 2
     # ----------- KEYBOARD ----------
 
-    relative_angle = get_relative_angle()
-
-    motor = angle_to_motor(
-        relative_angle
-    )
-
-    send_motor_command(motor)
+    angles = get_threat_angles()
+    votes = compute_motor_votes(angles)
+    send_motor_command(votes)
 
     # ------------------
     # DRAW
@@ -186,12 +226,8 @@ while running:
     )
 
     # threat
-    pygame.draw.circle(
-        screen,
-        (255,0,0),
-        (THREAT_X, THREAT_Y),
-        10
-    )
+    for (tx, ty) in THREATS:
+        pygame.draw.circle(screen, (255,0,0), (tx, ty), 10)
 
     pygame.display.flip()
 
