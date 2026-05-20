@@ -46,17 +46,19 @@ To ensure the belt correctly maps threats as the user turns, we define three fra
 
 | Module | Responsibility |
 | :--- | :--- |
-| **IMU Manager** | Interfaces with BNO08x via UART-RVC. Handles yaw zeroing (re-centering) and smoothing. |
-| **BLE Comms** | Manages the BLE peripheral. Receives threat packets (Azimuth, Intensity) and sends current Heading back to the host. |
-| **Threat Processor** | Performs the math: $Azimuth_{Relative} = Azimuth_{Target} - Heading_{Current}$. Maps the result to the nearest motor index (0-7). This module may increase in complexity when we begin handling multiple concurrent threats. |
-| **Haptic Driver** | Translates relative threat vectors into PWM signals. Exact design / haptic cue utilization still TBD. |
+| **IMU Manager** | Interfaces with BNO08x via UART-RVC. Handles yaw zeroing (re-centering) and smoothing. Maintains internal orientation state. |
+| **BLE Comms** | Manages the BLE peripheral. Receives threat packets (Threat ID, Azimuth/Bearing, Range/Intensity) via callbacks to update the Threat Manager. Sends current Heading back to the host on a fixed interval. |
+| **Threat Manager** | Data structure/class that manages a collection of active threats (bearing, range). Provides callbacks to add, update, or remove threats based on incoming BLE data. |
+| **Haptic Renderer** | Called each execution of the main loop. Examines the active threats in the Threat Manager and the current orientation from the IMU Manager. Determines which motors should buzz and how, then passes this to the Haptic Driver. |
+| **Haptic Driver** | Translates abstract haptic commands (from the Renderer) into physical PWM signals for the motors. |
 
 #### 3. Data Flow
 1.  **IMU Manager** updates `current_yaw` at 100Hz based on incoming signal from IMU.
-2.  **BLE Comms** receives a `Target Azimuth` from the host.
-3.  **Threat Processor** calculates the error between `Target Azimuth` and `current_yaw`.
-4.  **Haptic Driver** selects the motor closest to the error angle and fires a burst. Might need some additional abstraction if utilizing more complex haptic cues.
-5.  (Optional) **BLE Comms** sends `current_yaw` to host for 2D visualization/sync.
+2.  **BLE Comms** receives a threat packet (ID, Bearing, Range) from the host and triggers a callback on the **Threat Manager**.
+3.  **Threat Manager** adds or updates the threat in its internal state. Stale threats may be pruned.
+4.  In the main loop, the **Haptic Renderer** gets the active threats and `current_yaw`. It calculates the relative error ($Azimuth_{Relative} = Azimuth_{Target} - Heading_{Current}$) for each threat and decides the combined motor actuation strategy.
+5.  **Haptic Driver** applies the calculated PWM signals to the selected motors
+6.  **BLE Comms** periodically sends `current_yaw` back to the host for 2D visualization/sync.
 
 #### 4. Interfaces (Abstractions)
 
@@ -65,13 +67,29 @@ To ensure the belt correctly maps threats as the user turns, we define three fra
 float getHeading();       // Returns 0-360 relative to reference
 void setReference();      // Zeros the current yaw
 
-// Comms Interface
-void onThreatReceived(float azimuth, float intensity);
-void sendTelemetry(float currentYaw);
+// Threat Manager Interface
+struct Threat {
+    uint8_t id;
+    float bearing;
+    float range;
+    unsigned long lastUpdated;
+};
 
-// Haptic Interface
+class ThreatManager {
+public:
+    void addOrUpdateThreat(uint8_t id, float bearing, float range);
+    void removeThreat(uint8_t id);
+    void cleanupStaleThreats(unsigned long timeout);
+    int getActiveThreatCount();
+    Threat getThreat(int index);
+};
+
+// Haptic Renderer Interface
+void renderHaptics(ThreatManager& tm, float currentYaw);
+
+// Haptic Driver Interface
 void triggerMotor(int motorIndex, float intensity);
-void stopAll();
+void stopAllMotors();
 ```
 
 ### Proposed Hardware Mapping (Argon)
