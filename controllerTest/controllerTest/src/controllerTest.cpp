@@ -9,7 +9,7 @@
 // Include Particle Device OS APIs
 #include "Particle.h"
 #include "HapticBelt.h"
-#include  "Adafruit_BNO08x_Sahagun.h"
+// #include  "Adafruit_BNO08x_Sahagun.h"
 
 int light = D7;
 // Let Device OS manage the connection to the Particle Cloud
