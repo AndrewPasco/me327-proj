@@ -1,0 +1,474 @@
+# This visualization shows the user heading and multiple threat locations.
+#
+# LEFT CLICK:
+#   - click empty space -> create threat
+#   - click and hold on existing threat -> drag threat
+#
+# RIGHT CLICK:
+#   - click threat -> remove only that threat
+#   - click empty space -> remove all threats
+#
+# Threat data is transmitted as:
+#   threat_id,x,y,z; threat_id,x,y,z; ...
+#
+# Coordinate system:
+#   user position = (0,0,0)
+#   +x = right
+#   +y = up (as seen on screen)
+#
+# z values:
+#   z = 0   -> active threat
+#   z = -1  -> threat removed
+#
+# Threat IDs are unique and never reused.
+#
+# runs on python 3.11 with: pygame, pyserial, numpy, scipy, filterpy, bleak, bluetooth, bluez, bluez-tools
+
+import pygame
+import math
+import asyncio
+from bleak import BleakScanner, BleakClient
+import threading
+
+# ------------------
+# CONFIG
+# ------------------
+
+WIDTH = 800
+HEIGHT = 800
+
+CENTER = (WIDTH // 2, HEIGHT // 2)
+
+THREATS = []
+NEXT_THREAT_ID = 0
+
+drag_index = None
+
+latest_heading = 0
+user_heading_deg = 0
+heading_lock = threading.Lock()
+
+BLE_ADDRESS = None
+ble_client = None
+ble_loop_ref = None
+BLE_RX_UUID = "62c3cf89-247b-4c0f-a70d-651080844608"   # board sends this signal which is recieved by my computer
+BLE_TX_UUID = "62c3cf89-247b-4c0f-a70d-651080844608"   # my computer sends this signal which is received by the board 
+
+# ------------------
+# PYGAME INIT
+# ------------------
+
+pygame.init()
+
+screen = pygame.display.set_mode((WIDTH, HEIGHT))
+pygame.display.set_caption("Threat Visualization")
+
+clock = pygame.time.Clock()
+
+# ------------------
+# THREAT TX
+# ------------------
+
+def send_threat_data(threats):
+
+    if len(threats) == 0:
+        print("TX: no active threats")
+        return
+
+    messages = []
+
+    for threat in threats:
+
+        threat_id = threat["id"]
+
+        tx = threat["global_x"]
+        ty = threat["global_y"]
+
+        # convert to user-centered coordinates
+        global_x = tx - CENTER[0]
+
+        # invert pygame Y axis
+        global_y = CENTER[1] - ty
+
+        z = 0
+
+        msg = f"{threat_id},{global_x},{global_y},{z}"
+
+        messages.append(msg)
+
+    final_msg = ";".join(messages)
+
+    print("TX:", final_msg)
+    send_ble_message(final_msg + "\n")
+
+# ------------------
+# BLE CALLBACK
+# ------------------
+
+def handle_ble_data(sender, data):
+
+    global latest_heading
+
+    try:
+
+        msg = data.decode().strip()
+
+        if "YAW" in msg:
+            value = float(msg.split(",")[1])
+        else:
+            value = float(msg)
+
+        with heading_lock:
+            latest_heading = value
+
+    except:
+        pass
+
+def send_ble_message(message):
+
+    global ble_loop_ref
+
+    if ble_loop_ref is None:
+        return
+
+    asyncio.run_coroutine_threadsafe(
+        ble_send(message),
+        ble_loop_ref
+    )
+
+async def ble_send(message):
+
+    global ble_client
+
+    if ble_client is None:
+        return
+
+    try:
+
+        await ble_client.write_gatt_char(
+            BLE_TX_UUID,
+            message.encode()
+        )
+
+    except Exception as e:
+        print("BLE SEND FAILED:", e)
+
+# ------------------
+# BLE LOOP
+# ------------------
+
+async def ble_loop():
+
+    global BLE_ADDRESS
+
+    print("Scanning for Argon...")
+
+    devices = await BleakScanner.discover(timeout=10.0)
+
+    for d in devices:
+
+        print(f"{d.name} | {d.address}")
+
+        if d.name and "Argon" in d.name:
+            BLE_ADDRESS = d.address
+            break
+
+    if BLE_ADDRESS is None:
+        print("Argon not found.")
+        return
+
+    print(f"Connecting to {BLE_ADDRESS}")
+
+    async with BleakClient(BLE_ADDRESS) as client:
+
+        global ble_client
+
+        ble_client = client
+
+        print("Connected to BLE device")
+
+        print("\nSERVICES AND CHARACTERISTICS:")
+
+        # the below for loop is just for debugging to find the correct characteristic UUIDs, it can be removed once the correct ones are identified and hardcoded above
+        for service in client.services:
+
+            print(f"\nSERVICE: {service.uuid}")
+
+            for char in service.characteristics:
+
+                print(f"  CHARACTERISTIC: {char.uuid}")
+                print(f"  PROPERTIES: {char.properties}")
+
+                await client.start_notify(
+                    BLE_RX_UUID,
+                    handle_ble_data
+                )
+
+        while True:
+            await asyncio.sleep(0.1)
+
+# ------------------
+# BLE THREAD
+# ------------------
+
+def start_ble():
+
+    try:
+        global ble_loop_ref
+
+        ble_loop_ref = asyncio.new_event_loop()
+
+        asyncio.set_event_loop(ble_loop_ref)
+
+        ble_loop_ref.run_until_complete(
+            ble_loop()
+        )
+
+    except Exception as e:
+        print("BLE THREAD CRASHED:", e)
+
+ble_thread = threading.Thread(
+    target=start_ble,
+    daemon=True
+)
+
+ble_thread.start()
+
+# ------------------
+# MAIN LOOP
+# ------------------
+
+running = True
+
+while running:
+
+    # ------------------
+    # EVENTS
+    # ------------------
+
+    for event in pygame.event.get():
+
+        # quit
+        if event.type == pygame.QUIT:
+            running = False
+
+        # ------------------
+        # MOUSE DOWN
+        # ------------------
+
+        if event.type == pygame.MOUSEBUTTONDOWN:
+
+            mx, my = event.pos
+
+            # ------------------
+            # LEFT CLICK
+            # ------------------
+
+            if event.button == 1:
+
+                clicked_existing = False
+
+                # see if clicking existing threat
+                for i, threat in enumerate(THREATS):
+
+                    tx = threat["global_x"]
+                    ty = threat["global_y"]
+
+                    dist = math.hypot(tx - mx, ty - my)
+
+                    if dist < 15:
+
+                        drag_index = i
+                        clicked_existing = True
+                        break
+
+                # otherwise create new threat
+                if not clicked_existing:
+
+                    THREATS.append({
+                        "id": NEXT_THREAT_ID,
+                        "global_x": mx,
+                        "global_y": my
+                    })
+
+                    NEXT_THREAT_ID += 1
+
+            # ------------------
+            # RIGHT CLICK
+            # ------------------
+
+            if event.button == 3:
+
+                clicked_index = None
+
+                # check if clicking existing threat
+                for i, threat in enumerate(THREATS):
+
+                    tx = threat["global_x"]
+                    ty = threat["global_y"]
+
+                    dist = math.hypot(tx - mx, ty - my)
+
+                    if dist < 15:
+                        clicked_index = i
+                        break
+
+                # ------------------
+                # REMOVE SINGLE THREAT
+                # ------------------
+
+                if clicked_index is not None:
+
+                    threat = THREATS[clicked_index]
+
+                    threat_id = threat["id"]
+
+                    tx = threat["global_x"]
+                    ty = threat["global_y"]
+
+                    global_x = tx - CENTER[0]
+                    global_y = CENTER[1] - ty
+
+                    removal_msg = f"{threat_id},{global_x},{global_y},-1"
+
+                    print("TX:", removal_msg)
+                    send_ble_message(removal_msg + "\n")
+
+                    THREATS.pop(clicked_index)
+
+                # ------------------
+                # REMOVE ALL THREATS
+                # ------------------
+
+                else:
+
+                    for threat in THREATS:
+
+                        threat_id = threat["id"]
+
+                        tx = threat["global_x"]
+                        ty = threat["global_y"]
+
+                        global_x = tx - CENTER[0]
+                        global_y = CENTER[1] - ty
+
+                        removal_msg = f"{threat_id},{global_x},{global_y},-1"
+
+                        print("TX:", removal_msg)
+                        send_ble_message(removal_msg + "\n")
+                        # uncomment for hardware
+                        # ser.write((removal_msg + "\n").encode())
+
+                    THREATS.clear()
+
+        # ------------------
+        # MOUSE UP
+        # ------------------
+
+        if event.type == pygame.MOUSEBUTTONUP:
+
+            if event.button == 1:
+                drag_index = None
+
+        # ------------------
+        # MOUSE MOTION
+        # ------------------
+
+        if event.type == pygame.MOUSEMOTION:
+
+            if drag_index is not None:
+
+                THREATS[drag_index]["global_x"] = event.pos[0]
+                THREATS[drag_index]["global_y"] = event.pos[1]
+
+    # ------------------
+    # HEADING INPUT
+    # ------------------
+
+    # use BLE heading instead of keyboard:
+    # with heading_lock:
+    #     user_heading_deg = latest_heading
+
+    keys = pygame.key.get_pressed()
+
+    if keys[pygame.K_a]:
+        user_heading_deg += 2
+
+    if keys[pygame.K_d]:
+        user_heading_deg -= 2
+
+    # ------------------
+    # SEND THREAT DATA
+    # ------------------
+
+    send_threat_data(THREATS)
+
+    # ------------------
+    # DRAW
+    # ------------------
+
+    screen.fill((20, 20, 20))
+
+    # ------------------
+    # USER
+    # ------------------
+
+    pygame.draw.circle(
+        screen,
+        (255, 255, 255),
+        CENTER,
+        20
+    )
+
+    # ------------------
+    # HEADING ARROW
+    # ------------------
+
+    hx = CENTER[0] + 60 * math.sin(
+        math.radians(user_heading_deg)
+    )
+
+    hy = CENTER[1] - 60 * math.cos(
+        math.radians(user_heading_deg)
+    )
+
+    pygame.draw.line(
+        screen,
+        (0, 255, 0),
+        CENTER,
+        (hx, hy),
+        4
+    )
+
+    # ------------------
+    # THREATS
+    # ------------------
+
+    for threat in THREATS:
+
+        tx = threat["global_x"]
+        ty = threat["global_y"]
+
+        pygame.draw.circle(
+            screen,
+            (255, 0, 0),
+            (tx, ty),
+            10
+        )
+
+        # optional: draw threat ID
+        font = pygame.font.SysFont(None, 24)
+
+        text = font.render(
+            str(threat["id"]),
+            True,
+            (255, 255, 255)
+        )
+
+        screen.blit(text, (tx + 12, ty - 12))
+
+    pygame.display.flip()
+
+    clock.tick(30)  # this is 30 writes per second to BLE 
+
+pygame.quit()
