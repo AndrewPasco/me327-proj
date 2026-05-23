@@ -28,7 +28,7 @@ private:
     Quat oldQuat;
     Quat initQ;
 
-    bool setReports();
+    bool set_reports();
 
 };
 

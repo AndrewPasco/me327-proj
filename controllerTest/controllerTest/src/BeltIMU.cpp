@@ -17,7 +17,7 @@ void BeltIMU::setup(Quat initialOrientation){
         
     }
 
-    setReports();
+    set_reports();
     initQ = Qnormalize(initialOrientation);
     Serial.println("Reading IMU events");
 }
@@ -25,7 +25,7 @@ void BeltIMU::setup(Quat initialOrientation){
 bool BeltIMU::check_connection() {
     if (bno08x.wasReset()) {
         Serial.print("IMU was reset, attempting to set reports ");
-        bool reEnabled = setReports();
+        bool reEnabled = set_reports();
         return reEnabled;
     }
     return true;
@@ -56,7 +56,7 @@ Quat BeltIMU::get_quaternion () {
 /****************
  Private
 *****************/
-bool BeltIMU::setReports() {
+bool BeltIMU::set_reports() {
     Serial.println("Setting desired reports");
     if (! bno08x.enableReport(SH2_GAME_ROTATION_VECTOR)) {
         Serial.println("Could not enable game vector");
