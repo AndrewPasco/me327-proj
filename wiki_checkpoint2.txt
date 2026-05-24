@@ -1,0 +1,15 @@
+!!! Checkpoint 2
+
+In Checkpoint 2, we focused on refining the `belt_controller` software and preparing our hardware mounting strategy. On the software side, we prepared the main code to test the BNO085 IMU upon its arrival, integrated previously tested BLE communication code into the main control loop, and continued to refine the host-computer GUI for adjusting and rendering the environment. On the hardware side, we designed a few custom 3D-printable buckles / housings to facilitate adjustable mounting of the ERM vibration motors, motor drivers, main microcontroller, and IMU.
+
+'''Goals Met:'''
+*   '''IMU and Control Prep:''' Made significant alterations to the main code in the `belt_controller` to support the BNO085 IMU. We introduced logic to handle multiple active threats concurrently and added the UART-RVC library locally since Particle did not support importing it.
+*   '''BLE Integration:''' Integrated our previously tested BLE communications code into the main loop, replacing the simulated serial inputs and allowing the controller to receive dynamic threat updates (azimuth and intensity) from the host virtual environment over a robust wireless architecture.
+*   '''Hardware Mounting:''' Designed a custom 3D-printable buckle that attaches to commercial belt keepers we ordered online. This design allows for flexible, adjustable mounting of the ERMs and motor drivers around the circumference of the belt, ensuring consistent skin contact and comfort. Additionally, we designed a housing for the front, main buckle, which will hold the IMU and main microcontroller.
+
+'''Challenges:''' While waiting for the physical IMU to arrive, we've had limited opportunities to test software beyond the BLE comms. We anticipate needing to fine-tune the PWM intensities and threat mapping logic once the hardware is fully assembled and we can evaluate the ERM spin-up/spin-down and different haptic icons.
+
+'''Updated Plans:''' With the core control loop and BLE integration in place, our next focus will be physical integration. Once the IMU arrives, we will validate the UART-RVC data stream and compare with an I2C approach, then use the incoming data from the IMU to fine-tune our state estimation algorithm and threat rendering methodology. We will soon begin printing the newly designed buckles and assembling the full 8-motor array on the belt for user testing.
+
+%width=250px% Attach:BuckleImage.png 
+Caption: 3D model of the printable buckle designed for adjustable ERM and motor driver mounting.

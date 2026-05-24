@@ -73,6 +73,18 @@ Quat BeltIMU::get_quaternion () {
     return reorientedQuat;
 }
 
+float BeltIMU::get_heading() {
+    // get latest quaternion
+    Quat q = get_quaternion();
+    // Convert to Euler Yaw (heading)
+    // using standard formula
+    float siny_cosp = 2.0f * (q.w * q.z + q.x * q.y);
+    float cosy_cosp = 1.0f - 2.0f * (q.y * q.y + q.z * q.z);
+    float yaw_rad = atan2(siny_cosp, cosy_cosp);
+    float yaw_deg = yaw_rad * 180.0f / M_PI;
+    return yaw_deg;
+}
+
 
 /****************
  Private
