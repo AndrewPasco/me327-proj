@@ -26,7 +26,12 @@ void HapticBelt::loop() {
 
     // Grab quaternion from IMU
     IMUHandler.check_connection();
-    float yaw = IMUHandler.get_heading();
+    Quat orientation = IMUHandler.get_quaternion();
+    
+    // Convert to Euler Yaw
+    float siny_cosp = 2.0f * (orientation.w * orientation.z + orientation.x * orientation.y);
+    float cosy_cosp = 1.0f - 2.0f * (orientation.y * orientation.y + orientation.z * orientation.z);
+    float yaw = atan2(siny_cosp, cosy_cosp) * 180.0f / M_PI;
     
     // Parse received string threats
     ThreatTrack.update();
@@ -35,8 +40,7 @@ void HapticBelt::loop() {
     renderHaptics(yaw);
 
     // transmit orientation quaternion via BLE
-    BLEHandler.transmit_orientation(i,1,2,3);
-    i++;
+    BLEHandler.transmit_orientation(orientation.w, orientation.x, orientation.y, orientation.z);
 }
 
 float normalizeAngle(float angle) {
