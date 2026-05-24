@@ -17,7 +17,7 @@ public:
     void update();
 
     // populates activeList with pointers to active threats
-    int getActiveThreats(Threat* activeList[], int maxListSize);
+    int getActiveThreats(volatile Threat* activeList[], int maxListSize);
 
     // calculates relative position of all threats and calls motor driver to
     // appropriately render positions of threats

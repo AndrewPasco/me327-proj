@@ -46,7 +46,7 @@ void ThreatTracker::update() {
     if (localStr.length() == 0) return;
 
     // Parse semicolon separated threats
-    int startIdx = 0;
+    unsigned int startIdx = 0;
     while (startIdx < localStr.length()) {
         int endIdx = localStr.indexOf(';', startIdx);
         if (endIdx == -1) endIdx = localStr.length();
@@ -101,7 +101,7 @@ void ThreatTracker::update() {
     }
 }
 
-int ThreatTracker::getActiveThreats(Threat* activeList[], int maxListSize) {
+int ThreatTracker::getActiveThreats(volatile Threat* activeList[], int maxListSize) {
     int count = 0;
     for (int i = 0; i < maxThreats && count < maxListSize; i++) {
         if (Threats[i].active) {

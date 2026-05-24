@@ -18,7 +18,6 @@ void HapticBelt::setup() {
 }
 
 void HapticBelt::loop() {
-    static int i = 0;
     digitalWrite(light,HIGH);
     delay(50);
     digitalWrite(light,LOW);
@@ -52,7 +51,7 @@ float normalizeAngle(float angle) {
 }
 
 void HapticBelt::renderHaptics(float currentRelativeYaw) {
-    Threat* activeThreats[10];
+    volatile Threat* activeThreats[10];
     int count = ThreatTrack.getActiveThreats(activeThreats, 10);
     
     if (count == 0) {
