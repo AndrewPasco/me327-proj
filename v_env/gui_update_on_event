@@ -45,14 +45,17 @@ NEXT_THREAT_ID = 0
 drag_index = None
 
 latest_heading = 0
+latest_quaternion = [1.0, 0.0, 0.0, 0.0]
 user_heading_deg = 0
 heading_lock = threading.Lock()
+last_sent_heading = None
+last_printed_heading = None
 
 BLE_ADDRESS = None
 ble_client = None
 ble_loop_ref = None
 BLE_RX_UUID = "62c3cf89-247b-4c0f-a70d-651080844608"   # board sends this signal which is recieved by my computer
-BLE_TX_UUID = "62c3cf89-247b-4c0f-a70d-651080844608"   # my computer sends this signal which is received by the board 
+BLE_TX_UUID = "62c3cf89-247b-4c0f-a70d-651080844609"   # my computer sends this signal which is received by the board 
 
 # ------------------
 # PYGAME INIT
@@ -71,10 +74,12 @@ clock = pygame.time.Clock()
 
 def send_threat_data(threats):
 
+    # if len(threats) == 0:
+    #     final_msg = "CLEAR"
+    #     print("TX:", final_msg)
+    #     send_ble_message(final_msg + "\n")
+    #     return
     if len(threats) == 0:
-        final_msg = "CLEAR"
-        print("TX:", final_msg)
-        send_ble_message(final_msg + "\n")
         return
 
     messages = []
@@ -103,6 +108,48 @@ def send_threat_data(threats):
     print("TX:", final_msg)
     send_ble_message(final_msg + "\n")
 
+def send_single_threat(threat):
+
+    threat_id = threat["id"]
+
+    tx = threat["global_x"]
+    ty = threat["global_y"]
+
+    global_x = tx - CENTER[0]
+    global_y = CENTER[1] - ty
+
+    msg = f"{threat_id},{global_x},{global_y},0"
+
+    print("TX:", msg)
+    send_ble_message(msg + "\n")
+
+def send_move_threat(threat):
+    threat_id = threat["id"]
+
+    tx = threat["global_x"]
+    ty = threat["global_y"]
+
+    global_x = tx - CENTER[0]
+    global_y = CENTER[1] - ty
+
+    msg = f"{threat_id},{global_x},{global_y},0"
+
+    print("TX:", msg)
+    send_ble_message(msg + "\n")
+
+def quaternion_to_yaw_deg(w, x, y, z):
+
+    # standard quaternion -> yaw conversion
+
+    siny_cosp = 2.0 * (w * z + x * y)
+    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+
+    yaw_rad = math.atan2(siny_cosp, cosy_cosp)
+
+    yaw_deg = math.degrees(yaw_rad)
+
+    return yaw_deg
+
 # ------------------
 # BLE CALLBACK
 # ------------------
@@ -110,21 +157,42 @@ def send_threat_data(threats):
 def handle_ble_data(sender, data):
 
     global latest_heading
+    global latest_quaternion
+    global last_printed_heading
 
     try:
 
         msg = data.decode().strip()
 
-        if "YAW" in msg:
-            value = float(msg.split(",")[1])
-        else:
-            value = float(msg)
+        values = [float(v) for v in msg.split(",")]
+
+        if len(values) != 4:
+            return
+
+        w, x, y, z = values
+
+        latest_quaternion = [w, x, y, z]
+
+        # print messages for debugging the received IMU data
+        # print(f"RAW: {msg}")
+        # print(f"Q = {w:.3f}, {x:.3f}, {y:.3f}, {z:.3f}")
+
+        yaw_deg = quaternion_to_yaw_deg(
+            w, x, y, z
+        )
+
+        if (
+            last_printed_heading is None or
+            abs(yaw_deg - last_printed_heading) > 5
+        ):
+            print(f"Heading: {yaw_deg:.1f}")
+            last_printed_heading = yaw_deg
 
         with heading_lock:
-            latest_heading = value
+            latest_heading = yaw_deg
 
-    except:
-        pass
+    except Exception as e:
+        print("BAD IMU MESSAGE:", e)
 
 def send_ble_message(message):
 
@@ -206,8 +274,10 @@ async def ble_loop():
             handle_ble_data
         )
 
-        while True:
+        while client.is_connected:
             await asyncio.sleep(0.1)
+        
+        print("BLE disconnected")
 
 # ------------------
 # BLE THREAD
@@ -235,6 +305,7 @@ ble_thread = threading.Thread(
 )
 
 ble_thread.start()
+
 
 # ------------------
 # MAIN LOOP
@@ -287,13 +358,15 @@ while running:
                 # otherwise create new threat
                 if not clicked_existing:
 
-                    THREATS.append({
+                    new_threat = {
                         "id": NEXT_THREAT_ID,
                         "global_x": mx,
                         "global_y": my
-                    })
+                    }
 
-                    send_threat_data(THREATS)
+                    THREATS.append(new_threat)
+
+                    send_single_threat(new_threat)
 
                     NEXT_THREAT_ID += 1
 
@@ -340,8 +413,6 @@ while running:
 
                     THREATS.pop(clicked_index)
 
-                    send_threat_data(THREATS)
-
                 # ------------------
                 # REMOVE ALL THREATS
                 # ------------------
@@ -366,7 +437,6 @@ while running:
                         # ser.write((removal_msg + "\n").encode())
 
                     THREATS.clear()
-                    send_threat_data(THREATS)
         # ------------------
         # MOUSE UP
         # ------------------
@@ -384,26 +454,31 @@ while running:
 
             if drag_index is not None:
 
-                THREATS[drag_index]["global_x"] = event.pos[0]
-                THREATS[drag_index]["global_y"] = event.pos[1]
+                threat = THREATS[drag_index]
 
-                send_threat_data(THREATS)
+                threat["global_x"] = event.pos[0]
+                threat["global_y"] = event.pos[1]
+
+                send_move_threat(threat)
 
     # ------------------
     # HEADING INPUT
     # ------------------
 
     # use BLE heading instead of keyboard:
-    # with heading_lock:
-    #     user_heading_deg = latest_heading
+    with heading_lock:
+        user_heading_deg = latest_heading
 
-    keys = pygame.key.get_pressed()
 
-    if keys[pygame.K_a]:
-        user_heading_deg += 2
+    # --------- keyboard input
+    # keys = pygame.key.get_pressed()
 
-    if keys[pygame.K_d]:
-        user_heading_deg -= 2
+    # if keys[pygame.K_a]:
+    #     user_heading_deg += 2
+
+    # if keys[pygame.K_d]:
+    #     user_heading_deg -= 2
+    # --------- keyboard input
 
     # ------------------
     # DRAW
