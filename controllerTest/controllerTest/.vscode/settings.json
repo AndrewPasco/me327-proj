@@ -6,5 +6,5 @@
     },
     "particle.targetDevice": "e00fce68357368fab676a998",
     "particle.targetPlatform": "argon",
-    "particle.firmwareVersion": "4.2.0"
+    "particle.firmwareVersion": "6.4.0"
 }

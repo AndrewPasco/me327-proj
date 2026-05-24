@@ -1,7 +1,7 @@
 import serial
 import time
 
-PORT = "/dev/tty.usbmodem2101"   # change this
+PORT = "/dev/tty.usbmodem101"   # change this
 BAUD = 9600
 
 ser = serial.Serial(PORT, BAUD, timeout=1)

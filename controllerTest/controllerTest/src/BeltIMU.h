@@ -28,6 +28,8 @@ private:
     Quat oldQuat;
     Quat initQ;
 
+    bool connected = false;
+
     bool set_reports();
 
 };

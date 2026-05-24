@@ -419,7 +419,7 @@ static int uarthal_open(sh2_Hal_t *self) {
 
   // send a software reset
   uint8_t softreset_pkt[] = {0x7E, 1, 5, 0, 1, 0, 1, 0x7E};
-  for (int i = 0; i < sizeof(softreset_pkt); i++) {
+  for (size_t i = 0; i < sizeof(softreset_pkt); i++) {
     uart_dev->write(softreset_pkt[i]);
     delay(1);
   }
@@ -519,7 +519,7 @@ static int uarthal_write(sh2_Hal_t *self, uint8_t *pBuffer, unsigned len) {
   uart_dev->write(0x01);
   delay(1);
 
-  for (int i = 0; i < len; i++) {
+  for (size_t i = 0; i < len; i++) {
     c = pBuffer[i];
     if ((c == 0x7E) || (c == 0x7D)) {
       uart_dev->write(0x7D); // control

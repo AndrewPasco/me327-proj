@@ -16,7 +16,6 @@ void HapticBelt::setup() {
 
 void HapticBelt::loop() {
     static int i = 0;
-
     Serial.println("loop");
     digitalWrite(light,HIGH);
     delay(50);
@@ -26,9 +25,6 @@ void HapticBelt::loop() {
     // Grab quaternion from IMU
     IMUHandler.check_connection();
     Quat orientation = IMUHandler.get_quaternion();
-    
-    printQuat(orientation);
-    Serial.println("");
 
     // Pass quaternion to threat tracker to have it render threats
 
@@ -36,6 +32,6 @@ void HapticBelt::loop() {
 
     // transmit orientation quaternion via BLE
     
-    BLEHandler.transmit_orientation(i,1,2,3);
+    BLEHandler.transmit_orientation(orientation.w,orientation.x,orientation.y,orientation.z);
     i++;
 }

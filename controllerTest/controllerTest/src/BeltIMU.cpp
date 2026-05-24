@@ -9,20 +9,34 @@ BeltIMU::BeltIMU() :
 
 BeltIMU::~BeltIMU(){}
 
+// pass the quaternion you want the device to consider as
+// its initial orientation, relative to lying flat (probably)
+// just set to 1,0,0,0 and then orient it how you want, print the
+// quaternion, and pass that
 void BeltIMU::setup(Quat initialOrientation){
-    if (!bno08x.begin_I2C()) {
-        //if (!bno08x.begin_UART(&Serial1)) {  // Requires a device with > 300 byte UART buffer!
-        //if (!bno08x.begin_SPI(BNO08X_CS, BNO08X_INT)) {
-        Serial.println("Failed to find BNO08x chip");
-        
-    }
-
-    set_reports();
     initQ = Qnormalize(initialOrientation);
+    oldQuat = initQ;
+
+    if (!bno08x.begin_I2C()) {
+        Serial.println("Failed to find BNO08x chip");
+        return;
+    }
+    connected = true;
+    set_reports();
     Serial.println("Reading IMU events");
 }
 
 bool BeltIMU::check_connection() {
+    // re attemp connectino if not connected
+    if (!connected) {
+        if (!bno08x.begin_I2C()) {
+            Serial.println("Failed to find BNO08x chip");
+            return false;
+        }
+        connected=true;
+    }
+
+    // reset reports if device was reset
     if (bno08x.wasReset()) {
         Serial.print("IMU was reset, attempting to set reports ");
         bool reEnabled = set_reports();
@@ -32,6 +46,13 @@ bool BeltIMU::check_connection() {
 }
 
 Quat BeltIMU::get_quaternion () {
+    if (!connected) {
+        Serial.println("IMU not connected");
+        return oldQuat;
+    }
+
+    // retrieve quaternion from IMU. It will always be oriented assuming
+    // initial position is board lying flat down
     sh2_SensorValue_t data;
     if (!bno08x.getSensorEvent(&data)) {
         Serial.println("could not retrieve IMU event");
@@ -57,6 +78,9 @@ Quat BeltIMU::get_quaternion () {
  Private
 *****************/
 bool BeltIMU::set_reports() {
+    if (!connected) {
+        return false;
+    }
     Serial.println("Setting desired reports");
     if (! bno08x.enableReport(SH2_GAME_ROTATION_VECTOR)) {
         Serial.println("Could not enable game vector");
