@@ -28,7 +28,7 @@ private:
     Mutex dataMutex;
     
     static const int maxThreats = 10;
-    Threat Threats[maxThreats];
+    volatile Threat Threats[maxThreats];
     
     String byteString = "";
 
