@@ -3,6 +3,7 @@
 
 
 struct Threat {
+    int id = -1;
     bool active = false;
     float coords[3] = {0,0,0};
 };
@@ -11,6 +12,12 @@ class ThreatTracker
 public:
     ThreatTracker(){};
     ~ThreatTracker(){};
+
+    // parses the received byteString into the Threats array
+    void update();
+
+    // populates activeList with pointers to active threats
+    int getActiveThreats(volatile Threat* activeList[], int maxListSize);
 
     // calculates relative position of all threats and calls motor driver to
     // appropriately render positions of threats

@@ -22,6 +22,7 @@ public:
     bool check_connection();
 
     Quat get_quaternion ();
+    float get_heading();
     
 private:
     Adafruit_BNO08x bno08x;
