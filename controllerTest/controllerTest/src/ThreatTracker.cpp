@@ -28,6 +28,18 @@ void ThreatTracker::handle_rx(const uint8_t* data,
     // last byte of a c string must be the 0 byte
     buffer[copyLen] = '\0';
 
+    // parse string for threat ID, 
+    size_t threatIndex;
+    float x,y,z;
+    int matched = sscanf(  
+        text,  
+        "%d,%f,%f,%f",  
+        &threatIndex,
+        &x,  
+        &y,  
+        &z  
+    );
+
     WITH_LOCK(dataMutex) {
         byteString = buffer;
     }
