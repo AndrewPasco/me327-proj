@@ -28,85 +28,91 @@ void ThreatTracker::handle_rx(const uint8_t* data,
     // last byte of a c string must be the 0 byte
     buffer[copyLen] = '\0';
 
-    // parse string for threat ID, 
-    size_t threatIndex;
-    float x,y,z;
-    int matched = sscanf(  
-        text,  
-        "%d,%f,%f,%f",  
-        &threatIndex,
-        &x,  
-        &y,  
-        &z  
-    );
-
     WITH_LOCK(dataMutex) {
-        byteString = buffer;
+        if (messageCount >= messageBufferSize) {
+            Serial.println("Error: message buffer overflow");
+        } else {
+            byteStringBuffer[messageCount] = buffer;
+            messageCount++;
+        }
     }
-    Serial.println(byteString);
+    Serial.println(buffer);
 }
 
 void ThreatTracker::update() {
-    String localStr = "";
+    String localStrArray[10];
+    size_t numMessages = 0;
+
+
     WITH_LOCK(dataMutex) {
-        if (byteString.length() > 0) {
-            localStr = byteString;
-            byteString = ""; // clear after reading
+        if (messageCount > 0) {
+            numMessages = messageCount;
+            // need to loop through the array to 
+            // enforce deep copy, kinda dumb
+            for (size_t i = 0; i < numMessages; i++) {
+                localStrArray[i] = byteStringBuffer[i];
+            }
+            messageCount = 0; // clear after reading
         }
     }
     
-    if (localStr.length() == 0) return;
+    if (numMessages == 0) return;
 
-    // Parse semicolon separated threats
-    unsigned int startIdx = 0;
-    while (startIdx < localStr.length()) {
-        int endIdx = localStr.indexOf(';', startIdx);
-        if (endIdx == -1) endIdx = localStr.length();
-        
-        String threatStr = localStr.substring(startIdx, endIdx);
-        startIdx = endIdx + 1;
-        
-        if (threatStr.length() == 0) continue;
-        
-        // Parse id, x, y, z
-        int id;
-        float x, y;
-        int z;
-        if (sscanf(threatStr.c_str(), "%d,%f,%f,%d", &id, &x, &y, &z) == 4) {
+    
+    for (size_t i = 0; i < numMessages; i++) {
+        String localStr = localStrArray[i];
+
+        // Parse semicolon separated threats
+        unsigned int startIdx = 0;
+        while (startIdx < localStr.length()) {
+            int endIdx = localStr.indexOf(';', startIdx);
+            if (endIdx == -1) endIdx = localStr.length();
             
-            // Find existing threat slot, or an empty slot
-            int targetIdx = -1;
-            int emptyIdx = -1;
+            String threatStr = localStr.substring(startIdx, endIdx);
+            startIdx = endIdx + 1;
             
-            for (int i = 0; i < maxThreats; i++) {
-                if (Threats[i].active && Threats[i].id == id) {
-                    targetIdx = i; // Found existing
-                    break;
-                }
-                if (!Threats[i].active && emptyIdx == -1) {
-                    emptyIdx = i; // Found first empty
-                }
-            }
+            if (threatStr.length() == 0) continue;
             
-            if (z == -1) {
-                // Remove threat
-                if (targetIdx != -1) {
-                    Threats[targetIdx].active = false;
-                }
-            } else {
-                // Add or update threat
-                if (targetIdx == -1) {
-                    targetIdx = emptyIdx; // Use empty slot if new
+            // Parse id, x, y, z
+            int id;
+            float x, y;
+            int z;
+            if (sscanf(threatStr.c_str(), "%d,%f,%f,%d", &id, &x, &y, &z) == 4) {
+                
+                // Find existing threat slot, or an empty slot
+                int targetIdx = -1;
+                int emptyIdx = -1;
+                
+                for (int i = 0; i < maxThreats; i++) {
+                    if (Threats[i].active && Threats[i].id == id) {
+                        targetIdx = i; // Found existing
+                        break;
+                    }
+                    if (!Threats[i].active && emptyIdx == -1) {
+                        emptyIdx = i; // Found first empty
+                    }
                 }
                 
-                if (targetIdx != -1) { // If we found a valid slot
-                    Threats[targetIdx].id = id;
-                    Threats[targetIdx].active = true;
-                    Threats[targetIdx].coords[0] = x;
-                    Threats[targetIdx].coords[1] = y;
-                    Threats[targetIdx].coords[2] = z;
+                if (z == -1) {
+                    // Remove threat
+                    if (targetIdx != -1) {
+                        Threats[targetIdx].active = false;
+                    }
                 } else {
-                    Serial.println("Warning: Max threats reached, dropping threat");
+                    // Add or update threat
+                    if (targetIdx == -1) {
+                        targetIdx = emptyIdx; // Use empty slot if new
+                    }
+                    
+                    if (targetIdx != -1) { // If we found a valid slot
+                        Threats[targetIdx].id = id;
+                        Threats[targetIdx].active = true;
+                        Threats[targetIdx].coords[0] = x;
+                        Threats[targetIdx].coords[1] = y;
+                        Threats[targetIdx].coords[2] = z;
+                    } else {
+                        Serial.println("Warning: Max threats reached, dropping threat");
+                    }
                 }
             }
         }

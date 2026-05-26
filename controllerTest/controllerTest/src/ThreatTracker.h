@@ -37,7 +37,10 @@ private:
     static const int maxThreats = 10;
     volatile Threat Threats[maxThreats];
     
-    String byteString = "";
+    static const size_t messageBufferSize = 10;
+    String byteStringBuffer[messageBufferSize];
+    size_t messageCount = 0;
+
 
 	void handle_rx(const uint8_t* data,  
 					size_t len,  
