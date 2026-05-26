@@ -11,33 +11,34 @@ ThreatTracker::ThreatTracker() {
     };
     #define ARRAY_LEN(x) (sizeof(x) / sizeof((x)[0]))
 
-    unsigned long sig0[] = {};
-    unsigned long sig1[] = {};
-    unsigned long sig2[] = {};
-    unsigned long sig3[] = {};
-    unsigned long sig4[] = {};
-    unsigned long sig5[] = {};
-    unsigned long sig6[] = {};
-    unsigned long sig7[] = {};
-    unsigned long sig8[] = {};
+    unsigned long sig0[] = {300,300};
+    unsigned long sig1[] = {100,100};
+    unsigned long sig2[] = {100,100,100,300};
+    unsigned long sig3[] = {200,100};
+    unsigned long sig4[] = {100,100,100,100,100,400};
+    unsigned long sig5[] = {100,50};
+    unsigned long sig6[] = {50,100};
+    unsigned long sig7[] = {400,100};
+    unsigned long sig8[] = {200,100,100,200};
     unsigned long sig9[] = {};
+
     size_t numSigs = 20;
     signature sigs[numSigs] = 
     {
         {sig0, ARRAY_LEN(sig0)},
-        {sig1, ARRAY_LEN(sig0)},
-        {sig2, ARRAY_LEN(sig0)},
-        {sig3, ARRAY_LEN(sig0)},
-        {sig4, ARRAY_LEN(sig0)},
-        {sig5, ARRAY_LEN(sig0)},
-        {sig6, ARRAY_LEN(sig0)},
-        {sig7, ARRAY_LEN(sig0)},
-        {sig8, ARRAY_LEN(sig0)},
-        {sig9, ARRAY_LEN(sig0)},
+        {sig1, ARRAY_LEN(sig1)},
+        {sig2, ARRAY_LEN(sig2)},
+        {sig3, ARRAY_LEN(sig3)},
+        {sig4, ARRAY_LEN(sig4)},
+        {sig5, ARRAY_LEN(sig5)},
+        {sig6, ARRAY_LEN(sig6)},
+        {sig7, ARRAY_LEN(sig7)},
+        {sig8, ARRAY_LEN(sig8)},
+        {sig9, ARRAY_LEN(sig9)},
     };
-    
+
     for (size_t i = 0; i < 10;i++) {
-        Threats[0].signature = HapticSignature(sigs[i].data, sigs[i].len);
+        Threats[i].signature = HapticSignature(sigs[i].data, sigs[i].len);
     }
     
 }
