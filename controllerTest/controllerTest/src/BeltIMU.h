@@ -28,8 +28,10 @@ private:
     Adafruit_BNO08x bno08x;
     Quat oldQuat;
     Quat initQ;
+    Quat offsetQ = {1,0,0,0};
 
     bool connected = false;
+    bool justReset = false;
 
     bool set_reports();
 
