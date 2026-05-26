@@ -42,6 +42,13 @@ CENTER = (WIDTH // 2, HEIGHT // 2)
 THREATS = []
 NEXT_THREAT_ID = 0
 
+# constants for sector visualization
+NUM_MOTORS = 8
+SECTOR_SIZE = 360.0 / NUM_MOTORS
+
+SECTOR_INNER_RADIUS = 40
+SECTOR_OUTER_RADIUS = 300
+
 drag_index = None
 
 latest_heading = 0
@@ -151,6 +158,144 @@ def quaternion_to_yaw_deg(w, x, y, z):
     return yaw_deg
 
 # ------------------
+# SECTOR VISUALIZATION
+# ------------------
+def get_threat_relative_angle(threat, heading_deg):
+    """
+    Returns threat angle relative to the user's heading.
+
+    0 deg   = straight ahead
+    90 deg  = right
+    180 deg = behind
+    270 deg = left
+    """
+
+    dx = threat["global_x"] - CENTER[0]
+
+    # convert pygame coordinates to standard coordinates
+    dy = CENTER[1] - threat["global_y"]
+
+    world_angle = math.degrees(
+        math.atan2(dx, dy)
+    )
+
+    relative_angle = (
+        world_angle - heading_deg
+    ) % 360
+
+    return relative_angle
+
+def get_threat_sector(threat, heading_deg):
+
+    angle = get_threat_relative_angle(threat, heading_deg)
+
+    angle = (angle + SECTOR_SIZE / 2) % 360
+
+    return int(angle // SECTOR_SIZE)
+
+def get_active_sectors(threats, heading_deg):
+
+    active_sectors = set()
+
+    for threat in threats:
+
+        sector = get_threat_sector(
+            threat,
+            heading_deg
+        )
+
+        active_sectors.add(sector)
+
+    return active_sectors
+
+def draw_sector(
+    screen,
+    center,
+    start_angle_deg,
+    end_angle_deg,
+    inner_radius,
+    outer_radius,
+    color,
+    border_color=(120, 120, 120),
+    border_width=2,
+    resolution=20
+):
+
+    points = []
+
+    #
+    # outer arc
+    #
+    for i in range(resolution + 1):
+
+        frac = i / resolution
+
+        angle = (
+            start_angle_deg
+            + frac * (end_angle_deg - start_angle_deg)
+        )
+
+        x = center[0] + outer_radius * math.sin(
+            math.radians(angle)
+        )
+
+        y = center[1] - outer_radius * math.cos(
+            math.radians(angle)
+        )
+
+        points.append((x, y))
+
+    #
+    # inner arc (reverse direction)
+    #
+    for i in range(resolution, -1, -1):
+
+        frac = i / resolution
+
+        angle = (
+            start_angle_deg
+            + frac * (end_angle_deg - start_angle_deg)
+        )
+
+        x = center[0] + inner_radius * math.sin(
+            math.radians(angle)
+        )
+
+        y = center[1] - inner_radius * math.cos(
+            math.radians(angle)
+        )
+
+        points.append((x, y))
+
+    pygame.draw.polygon(
+        screen,
+        color,
+        points
+    )
+
+    pygame.draw.polygon(
+        screen,
+        border_color,
+        points,
+        border_width
+    )
+
+def draw_sector_map(screen, center, heading_deg, active_sectors ):
+
+    for sector in range(NUM_MOTORS):
+
+        start_angle = (heading_deg - SECTOR_SIZE/2 + sector * SECTOR_SIZE)
+
+        end_angle = (heading_deg - SECTOR_SIZE/2 + (sector + 1) * SECTOR_SIZE)
+
+        if sector in active_sectors:
+            color = (255, 140, 0)
+        else:
+            color = (50, 50, 50)
+
+        draw_sector(screen, center, start_angle, end_angle, SECTOR_INNER_RADIUS, SECTOR_OUTER_RADIUS, color)
+
+# ------------------
 # BLE CALLBACK
 # ------------------
 
@@ -257,17 +402,17 @@ async def ble_loop():
 
         print("Connected to BLE device")
 
-        print("\nSERVICES AND CHARACTERISTICS:")
+        # print("\nSERVICES AND CHARACTERISTICS:")
 
-        # the below for loop is just for debugging to find the correct characteristic UUIDs, it can be removed once the correct ones are identified and hardcoded above
-        for service in client.services:
+        # # the below for loop is just for debugging to find the correct characteristic UUIDs, it can be removed once the correct ones are identified and hardcoded above
+        # for service in client.services:
 
-            print(f"\nSERVICE: {service.uuid}")
+        #     print(f"\nSERVICE: {service.uuid}")
 
-            for char in service.characteristics:
+        #     for char in service.characteristics:
 
-                print(f"  CHARACTERISTIC: {char.uuid}")
-                print(f"  PROPERTIES: {char.properties}")
+        #         print(f"  CHARACTERISTIC: {char.uuid}")
+        #         print(f"  PROPERTIES: {char.properties}")
 
         await client.start_notify(
             BLE_RX_UUID,
@@ -485,6 +630,13 @@ while running:
     # ------------------
 
     screen.fill((20, 20, 20))
+
+    # ------------------
+    # SECTOR HIGHLIGHTS
+    # ------------------
+    active_sectors = get_active_sectors(THREATS, user_heading_deg)
+
+    draw_sector_map(screen, CENTER, user_heading_deg, active_sectors)
 
     # ------------------
     # USER
