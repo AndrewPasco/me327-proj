@@ -33,12 +33,13 @@ bool BeltIMU::check_connection() {
             Serial.println("Failed to find BNO08x chip");
             return false;
         }
-        connected=true;
+        connected = true;
     }
 
     // reset reports if device was reset
     if (bno08x.wasReset()) {
         Serial.print("IMU was reset, attempting to set reports ");
+        justReset = true;
         bool reEnabled = set_reports();
         return reEnabled;
     }
@@ -55,7 +56,7 @@ Quat BeltIMU::get_quaternion () {
     // initial position is board lying flat down
     sh2_SensorValue_t data;
     if (!bno08x.getSensorEvent(&data)) {
-        Serial.println("could not retrieve IMU event");
+        // No new data available this loop iteration
         return oldQuat;
     }
     float qw = data.un.rotationVector.real;
@@ -68,9 +69,19 @@ Quat BeltIMU::get_quaternion () {
     // to find quaternion relative to initial orientation
     Quat reorientedQuat = Qmultiply( newQuat, Qconj(initQ) );
     
-    oldQuat = reorientedQuat;
+    if (justReset) {
+        // Find offsetQ such that Qmultiply(reorientedQuat, offsetQ) == oldQuat
+        // offsetQ = Qmultiply(Qconj(reorientedQuat), oldQuat)
+        offsetQ = Qmultiply(Qconj(reorientedQuat), oldQuat);
+        justReset = false;
+    }
+    
+    // Apply offset
+    Quat finalQuat = Qmultiply(reorientedQuat, offsetQ);
+    
+    oldQuat = finalQuat;
 
-    return reorientedQuat;
+    return finalQuat;
 }
 
 float BeltIMU::get_heading() {
