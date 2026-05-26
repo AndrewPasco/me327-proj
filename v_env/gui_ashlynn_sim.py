@@ -45,9 +45,13 @@ NEXT_THREAT_ID = 0
 # constants for sector visualization
 NUM_MOTORS = 8
 SECTOR_SIZE = 360.0 / NUM_MOTORS
-
 SECTOR_INNER_RADIUS = 40
 SECTOR_OUTER_RADIUS = 390
+
+# constants for game simulation
+simulation_running = False
+simulation_start_time = 0
+SIM_THREATS = []
 
 drag_index = None
 
@@ -296,6 +300,162 @@ def draw_sector_map(screen, center, heading_deg, active_sectors ):
         draw_sector(screen, center, start_angle, end_angle, SECTOR_INNER_RADIUS, SECTOR_OUTER_RADIUS, color)
 
 # ------------------
+# SIMULATION UPDATE
+# ------------------
+
+def update_simulation():
+
+    global NEXT_THREAT_ID
+    global simulation_running
+
+    if not simulation_running:
+        return
+
+    t = (pygame.time.get_ticks() - simulation_start_time) / 1000.0
+
+    # PHASE 1: single flyby of one threat from left to right
+    if 0 <= t < 15:
+
+        if len(SIM_THREATS) == 0:
+
+            threat = {
+                "id": NEXT_THREAT_ID,
+                "global_x": -100,
+                "global_y": CENTER[1]
+            }
+
+            NEXT_THREAT_ID += 1
+
+            THREATS.append(threat)
+            SIM_THREATS.append(threat)
+
+            send_single_threat(threat)
+
+        threat = SIM_THREATS[0]
+
+        threat["global_x"] = -100 + t * 60
+
+        send_move_threat(threat)
+
+    # PHASE 2: a single threat moving in a circle around the user
+    elif 15 <= t < 30:
+
+        threat = SIM_THREATS[0]
+
+        angle = (t - 15) * 30
+
+        r = 250
+
+        threat["global_x"] = (CENTER[0] + r * math.sin(math.radians(angle)))
+
+        threat["global_y"] = (CENTER[1] - r * math.cos(math.radians(angle)))
+
+        send_move_threat(threat)
+
+    # PHASE 3: multiple threats (3) appearing and moving
+    elif 30 <= t < 45:
+
+        while len(SIM_THREATS) < 3:
+
+            threat = {
+                "id": NEXT_THREAT_ID,
+                "global_x": CENTER[0],
+                "global_y": CENTER[1]
+            }
+
+            NEXT_THREAT_ID += 1
+
+            THREATS.append(threat)
+            SIM_THREATS.append(threat)
+
+            send_single_threat(threat)
+
+        angles = [
+            (t - 30) * 25,
+            (t - 30) * 25 + 120,
+            (t - 30) * 25 + 240
+        ]
+
+        for threat, angle in zip(SIM_THREATS, angles):
+
+            r = 250
+
+            threat["global_x"] = (
+                CENTER[0]
+                + r * math.sin(math.radians(angle))
+            )
+
+            threat["global_y"] = (
+                CENTER[1]
+                - r * math.cos(math.radians(angle))
+            )
+
+            send_move_threat(threat)
+
+    # PHASE 4: five total threats moving around
+    elif 45 <= t < 60:
+
+        while len(SIM_THREATS) < 5:
+
+            threat = {
+                "id": NEXT_THREAT_ID,
+                "global_x": CENTER[0],
+                "global_y": CENTER[1]
+            }
+
+            NEXT_THREAT_ID += 1
+
+            THREATS.append(threat)
+            SIM_THREATS.append(threat)
+
+            send_single_threat(threat)
+
+        for i, threat in enumerate(SIM_THREATS):
+
+            angle = (
+                (t - 45) * (20 + i * 10)
+                + i * 72
+            )
+
+            r = 180 + 60 * math.sin(
+                (t - 45) * 0.7 + i
+            )
+
+            threat["global_x"] = (
+                CENTER[0]
+                + r * math.sin(math.radians(angle))
+            )
+
+            threat["global_y"] = (
+                CENTER[1]
+                - r * math.cos(math.radians(angle))
+            )
+
+            send_move_threat(threat)
+
+    # PHASE 5: remove all threats and reset sim
+    else:
+
+        for threat in THREATS:
+
+            tx = threat["global_x"]
+            ty = threat["global_y"]
+
+            gx = tx - CENTER[0]
+            gy = CENTER[1] - ty
+
+            send_ble_message(
+                f"{threat['id']},{gx},{gy},-1\n"
+            )
+
+        THREATS.clear()
+        SIM_THREATS.clear()
+
+        simulation_running = False
+
+        print("Simulation complete")
+
+# ------------------
 # BLE CALLBACK
 # ------------------
 
@@ -471,10 +631,35 @@ while running:
             running = False
 
         # ------------------
+        # SPACE BAR
+        # ------------------
+        if event.type == pygame.KEYDOWN:
+
+            if event.key == pygame.K_SPACE:
+
+                simulation_running = not simulation_running
+
+                if simulation_running:
+
+                    simulation_start_time = pygame.time.get_ticks()
+
+                    THREATS.clear()
+                    SIM_THREATS.clear()
+                    NEXT_THREAT_ID = 0
+
+                    print("Simulation started")
+
+                else:
+                    print("Simulation paused")
+
+        # ------------------
         # MOUSE DOWN
         # ------------------
 
         if event.type == pygame.MOUSEBUTTONDOWN:
+            
+            if simulation_running:
+                continue   # skip ALL mouse clicks during simulation
 
             mx, my = event.pos
 
@@ -614,6 +799,9 @@ while running:
     with heading_lock:
         user_heading_deg = latest_heading
 
+    # call simulation function if simulation is running:
+    if simulation_running:
+        update_simulation()
 
     # --------- keyboard input
     # keys = pygame.key.get_pressed()
