@@ -1,891 +1,697 @@
-# This visualization shows the user heading and multiple threat locations.
+# Haptic belt threat simulation — game mode
 #
-# LEFT CLICK:
-#   - click empty space -> create threat
-#   - click and hold on existing threat -> drag threat
+# Threats approach from multiple sectors across 4 escalating waves.
+# Face a threat sector for 3 seconds to neutralize it.
+# Don't let threats reach the danger zone (inner dashed red ring).
 #
-# RIGHT CLICK:
-#   - click threat -> remove only that threat
-#   - click empty space -> remove all threats
+# Controls:
+#   SPACE          — start / restart
+#   ← → arrow keys — rotate heading when BLE not connected
 #
-# Threat data is transmitted as:
-#   threat_id,x,y,z
+# BLE connects automatically to "Argon" device (same UUIDs as original script).
 #
-# Coordinate system:
-#   user position = (0,0,0)
-#   +x = right
-#   +y = up (as seen on screen)
+# Threat message format (same as gui_update_on_event.py):
+#   spawn/move: "id,x,y,0\n"
+#   remove:     "id,x,y,-1\n"
 #
-# z values:
-#   z = 0   -> active threat
-#   z = -1  -> threat removed
-#
-# Threat IDs are unique and never reused.
-#
-# runs on python 3.11 with: pygame, pyserial, numpy, scipy, filterpy, bleak, bluetooth, bluez, bluez-tools
+# Runs on Python 3.11+ with: pygame, bleak
 
 import pygame
 import math
 import asyncio
 from bleak import BleakScanner, BleakClient
 import threading
+import random
 
-# ------------------
-# CONFIG
-# ------------------
+# ─── CONFIG ──────────────────────────────────────────────────────────────────
 
-WIDTH = 800
+WIDTH  = 800
 HEIGHT = 800
-
+FPS    = 30
 CENTER = (WIDTH // 2, HEIGHT // 2)
 
-THREATS = []
-NEXT_THREAT_ID = 0
+METERS_TO_PX     = 300.0 / 500.0   # 500 m maps to 300 px (outer sector ring edge)
+TERMINAL_M       = 50               # danger zone radius in metres
+TERMINAL_PX      = int(TERMINAL_M * METERS_TO_PX)   # 30 px
 
-# constants for sector visualization
-NUM_MOTORS = 8
-SECTOR_SIZE = 360.0 / NUM_MOTORS
+LOCK_ON_DURATION = 3.0              # seconds user must face a sector to neutralize
+
+NUM_MOTORS   = 8
+SECTOR_SIZE  = 360.0 / NUM_MOTORS   # 45 °
+
 SECTOR_INNER_RADIUS = 40
-SECTOR_OUTER_RADIUS = 390
+SECTOR_OUTER_RADIUS = 300
 
-# constants for game simulation
-simulation_running = False
-simulation_start_time = 0
-SIM_THREATS = []
+RANGE_RINGS_M = [100, 200, 300, 400, 500]
 
-drag_index = None
+SPIRAL_OMEGA = 0.2          # rad/s (angular drift)
+SPIRAL_RADIAL_SPEED = 18    # px/s (inward speed)
 
-latest_heading = 0
-latest_quaternion = [1.0, 0.0, 0.0, 0.0]
-user_heading_deg = 0
-heading_lock = threading.Lock()
-last_sent_heading = None
+# Wave schedule.
+# spawn_time: seconds after SPACE is pressed.
+# Wave 1 spawns at T=3 so there's a built-in countdown.
+# angle_deg: compass bearing FROM WHICH the threat approaches (0=N, 90=E, …).
+WAVE_SCHEDULE = [
+    {
+        "spawn_time": 3.0,
+        "label": "WAVE 1",
+        "threats": [
+            {"angle_deg":   0, "speed_mps": 16, "distance_m": 400},
+            {"angle_deg": 175, "speed_mps": 16, "distance_m": 400},
+        ],
+    },
+    {
+        "spawn_time": 12.0,
+        "label": "WAVE 2",
+        "threats": [
+            {"angle_deg":  45, "speed_mps": 19, "distance_m": 500},
+            {"angle_deg": 180, "speed_mps": 19, "distance_m": 500},
+            {"angle_deg": 315, "speed_mps": 19, "distance_m": 500},
+        ],
+    },
+    {
+        "spawn_time": 21.0,
+        "label": "WAVE 3",
+        "threats": [
+            {"angle_deg":  30, "speed_mps": 22, "distance_m": 500},
+            {"angle_deg": 120, "speed_mps": 22, "distance_m": 500},
+            {"angle_deg": 240, "speed_mps": 22, "distance_m": 500},
+            {"angle_deg": 330, "speed_mps": 22, "distance_m": 500},
+        ],
+    },
+    {
+        "spawn_time": 30.0,
+        "label": "WAVE 4",
+        "threats": [
+            {"angle_deg":  10, "speed_mps": 25, "distance_m": 500},
+            {"angle_deg":  82, "speed_mps": 25, "distance_m": 500},
+            {"angle_deg": 154, "speed_mps": 25, "distance_m": 500},
+            {"angle_deg": 226, "speed_mps": 25, "distance_m": 500},
+            {"angle_deg": 298, "speed_mps": 25, "distance_m": 500},
+        ],
+    },
+]
+
+TOTAL_THREATS = sum(len(w["threats"]) for w in WAVE_SCHEDULE)
+
+# ─── BLE GLOBALS ─────────────────────────────────────────────────────────────
+
+BLE_ADDRESS  = None
+ble_client   = None
+ble_loop_ref = None
+ble_connected = False
+ble_status    = "scanning"   # "scanning" | "connected" | "not found" | "disconnected"
+
+BLE_RX_UUID = "62c3cf89-247b-4c0f-a70d-651080844608"
+BLE_TX_UUID = "62c3cf89-247b-4c0f-a70d-651080844609"
+
+latest_heading       = 0.0
+heading_lock         = threading.Lock()
 last_printed_heading = None
 
-BLE_ADDRESS = None
-ble_client = None
-ble_loop_ref = None
-BLE_RX_UUID = "62c3cf89-247b-4c0f-a70d-651080844608"   # board sends this signal which is recieved by my computer
-BLE_TX_UUID = "62c3cf89-247b-4c0f-a70d-651080844609"   # my computer sends this signal which is received by the board 
+# ─── GAME STATE ──────────────────────────────────────────────────────────────
 
-# ------------------
-# PYGAME INIT
-# ------------------
+STATE_INTRO   = "intro"
+STATE_PLAYING = "playing"
+STATE_END     = "end"
+
+state             = STATE_INTRO
+game_time         = 0.0
+threats           = []          # list of active threat dicts
+animations        = []          # list of in-flight animation dicts
+screen_flash      = None        # {"color", "timer", "duration"} or None
+next_threat_id    = 0
+waves_spawned     = 0
+current_wave_num  = 0
+misses            = 0
+neutralized_count = 0
+wave_notification = None        # {"label", "timer"} or None
+user_heading_deg  = 0.0
+
+# ─── PYGAME INIT ─────────────────────────────────────────────────────────────
 
 pygame.init()
-
-screen = pygame.display.set_mode((WIDTH, HEIGHT))
-pygame.display.set_caption("Threat Visualization")
-
+screen_surf = pygame.display.set_mode((WIDTH, HEIGHT))
+pygame.display.set_caption("Threat Simulation")
 clock = pygame.time.Clock()
 
-# ------------------
-# THREAT TX
-# ------------------
+font_xl    = pygame.font.SysFont(None, 80)
+font_large = pygame.font.SysFont(None, 56)
+font_med   = pygame.font.SysFont(None, 36)
+font_small = pygame.font.SysFont(None, 24)
 
-def send_threat_data(threats):
+# ─── GEOMETRY ────────────────────────────────────────────────────────────────
 
-    # if len(threats) == 0:
-    #     final_msg = "CLEAR"
-    #     print("TX:", final_msg)
-    #     send_ble_message(final_msg + "\n")
-    #     return
-    if len(threats) == 0:
-        return
+def bearing_to_screen(bearing_deg, distance_px):
+    """Convert a compass bearing + pixel distance to a screen (x, y) position."""
+    rad = math.radians(bearing_deg)
+    x = CENTER[0] + distance_px * math.sin(rad)
+    y = CENTER[1] - distance_px * math.cos(rad)
+    return x, y
 
-    messages = []
-
-    for threat in threats:
-
-        threat_id = threat["id"]
-
-        tx = threat["global_x"]
-        ty = threat["global_y"]
-
-        # convert to user-centered coordinates
-        global_x = tx - CENTER[0]
-
-        # invert pygame Y axis
-        global_y = CENTER[1] - ty
-
-        z = 0
-
-        msg = f"{threat_id},{global_x},{global_y},{z}"
-
-        messages.append(msg)
-
-    final_msg = ";".join(messages)
-
-    print("TX:", final_msg)
-    send_ble_message(final_msg + "\n")
-
-def send_single_threat(threat):
-
-    threat_id = threat["id"]
-
-    tx = threat["global_x"]
-    ty = threat["global_y"]
-
-    global_x = tx - CENTER[0]
-    global_y = CENTER[1] - ty
-
-    msg = f"{threat_id},{global_x},{global_y},0"
-
-    print("TX:", msg)
-    send_ble_message(msg + "\n")
-
-def send_move_threat(threat):
-    threat_id = threat["id"]
-
-    tx = threat["global_x"]
-    ty = threat["global_y"]
-
-    global_x = tx - CENTER[0]
-    global_y = CENTER[1] - ty
-
-    msg = f"{threat_id},{global_x},{global_y},0"
-
-    print("TX:", msg)
-    send_ble_message(msg + "\n")
-
-def quaternion_to_yaw_deg(w, x, y, z):
-
-    # standard quaternion -> yaw conversion
-
-    siny_cosp = 2.0 * (w * z + x * y)
-    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
-
-    yaw_rad = math.atan2(siny_cosp, cosy_cosp)
-
-    yaw_deg = math.degrees(yaw_rad)
-
-    return yaw_deg
-
-# ------------------
-# SECTOR VISUALIZATION
-# ------------------
 def get_threat_relative_angle(threat, heading_deg):
-    """
-    Returns threat angle relative to the user's heading.
-
-    0 deg   = straight ahead
-    90 deg  = right
-    180 deg = behind
-    270 deg = left
-    """
-
-    dx = threat["global_x"] - CENTER[0]
-
-    # convert pygame coordinates to standard coordinates
-    dy = CENTER[1] - threat["global_y"]
-
-    world_angle = math.degrees(
-        math.atan2(dx, dy)
-    )
-
-    relative_angle = (
-        world_angle - heading_deg
-    ) % 360
-
-    return relative_angle
+    dx = threat["x"] - CENTER[0]
+    dy = CENTER[1]   - threat["y"]
+    world_angle = math.degrees(math.atan2(dx, dy))
+    return (world_angle - heading_deg) % 360
 
 def get_threat_sector(threat, heading_deg):
-
     angle = get_threat_relative_angle(threat, heading_deg)
+    return int(((angle + SECTOR_SIZE / 2) % 360) // SECTOR_SIZE)
 
-    angle = (angle + SECTOR_SIZE / 2) % 360
+def get_active_sectors(threat_list, heading_deg):
+    return {get_threat_sector(t, heading_deg) for t in threat_list}
 
-    return int(angle // SECTOR_SIZE)
+def screen_to_global(x, y):
+    """Convert pygame screen coords to user-centred coordinate space for BLE."""
+    return x - CENTER[0], CENTER[1] - y
 
-def get_active_sectors(threats, heading_deg):
+# ─── BLE ─────────────────────────────────────────────────────────────────────
 
-    active_sectors = set()
-
-    for threat in threats:
-
-        sector = get_threat_sector(
-            threat,
-            heading_deg
-        )
-
-        active_sectors.add(sector)
-
-    return active_sectors
-
-def draw_sector(
-    screen,
-    center,
-    start_angle_deg,
-    end_angle_deg,
-    inner_radius,
-    outer_radius,
-    color,
-    border_color=(120, 120, 120),
-    border_width=2,
-    resolution=20
-):
-
-    points = []
-
-    #
-    # outer arc
-    #
-    for i in range(resolution + 1):
-
-        frac = i / resolution
-
-        angle = (
-            start_angle_deg
-            + frac * (end_angle_deg - start_angle_deg)
-        )
-
-        x = center[0] + outer_radius * math.sin(
-            math.radians(angle)
-        )
-
-        y = center[1] - outer_radius * math.cos(
-            math.radians(angle)
-        )
-
-        points.append((x, y))
-
-    #
-    # inner arc (reverse direction)
-    #
-    for i in range(resolution, -1, -1):
-
-        frac = i / resolution
-
-        angle = (
-            start_angle_deg
-            + frac * (end_angle_deg - start_angle_deg)
-        )
-
-        x = center[0] + inner_radius * math.sin(
-            math.radians(angle)
-        )
-
-        y = center[1] - inner_radius * math.cos(
-            math.radians(angle)
-        )
-
-        points.append((x, y))
-
-    pygame.draw.polygon(
-        screen,
-        color,
-        points
-    )
-
-    pygame.draw.polygon(
-        screen,
-        border_color,
-        points,
-        border_width
-    )
-
-def draw_sector_map(screen, center, heading_deg, active_sectors ):
-
-    for sector in range(NUM_MOTORS):
-
-        start_angle = (heading_deg - SECTOR_SIZE/2 + sector * SECTOR_SIZE)
-
-        end_angle = (heading_deg - SECTOR_SIZE/2 + (sector + 1) * SECTOR_SIZE)
-
-        if sector in active_sectors:
-            color = (255, 140, 0)
-        else:
-            color = (50, 50, 50)
-
-        draw_sector(screen, center, start_angle, end_angle, SECTOR_INNER_RADIUS, SECTOR_OUTER_RADIUS, color)
-
-# ------------------
-# SIMULATION UPDATE
-# ------------------
-
-def update_simulation():
-
-    global NEXT_THREAT_ID
-    global simulation_running
-
-    if not simulation_running:
-        return
-
-    t = (pygame.time.get_ticks() - simulation_start_time) / 1000.0
-
-    # PHASE 1: single flyby of one threat from left to right
-    if 0 <= t < 15:
-
-        if len(SIM_THREATS) == 0:
-
-            threat = {
-                "id": NEXT_THREAT_ID,
-                "global_x": -100,
-                "global_y": CENTER[1]
-            }
-
-            NEXT_THREAT_ID += 1
-
-            THREATS.append(threat)
-            SIM_THREATS.append(threat)
-
-            send_single_threat(threat)
-
-        threat = SIM_THREATS[0]
-
-        threat["global_x"] = -100 + t * 60
-
-        send_move_threat(threat)
-
-    # PHASE 2: a single threat moving in a circle around the user
-    elif 15 <= t < 30:
-
-        threat = SIM_THREATS[0]
-
-        angle = (t - 15) * 30
-
-        r = 250
-
-        threat["global_x"] = (CENTER[0] + r * math.sin(math.radians(angle)))
-
-        threat["global_y"] = (CENTER[1] - r * math.cos(math.radians(angle)))
-
-        send_move_threat(threat)
-
-    # PHASE 3: multiple threats (3) appearing and moving
-    elif 30 <= t < 45:
-
-        while len(SIM_THREATS) < 3:
-
-            threat = {
-                "id": NEXT_THREAT_ID,
-                "global_x": CENTER[0],
-                "global_y": CENTER[1]
-            }
-
-            NEXT_THREAT_ID += 1
-
-            THREATS.append(threat)
-            SIM_THREATS.append(threat)
-
-            send_single_threat(threat)
-
-        angles = [
-            (t - 30) * 25,
-            (t - 30) * 25 + 120,
-            (t - 30) * 25 + 240
-        ]
-
-        for threat, angle in zip(SIM_THREATS, angles):
-
-            r = 250
-
-            threat["global_x"] = (
-                CENTER[0]
-                + r * math.sin(math.radians(angle))
-            )
-
-            threat["global_y"] = (
-                CENTER[1]
-                - r * math.cos(math.radians(angle))
-            )
-
-            send_move_threat(threat)
-
-    # PHASE 4: five total threats moving around
-    elif 45 <= t < 60:
-
-        while len(SIM_THREATS) < 5:
-
-            threat = {
-                "id": NEXT_THREAT_ID,
-                "global_x": CENTER[0],
-                "global_y": CENTER[1]
-            }
-
-            NEXT_THREAT_ID += 1
-
-            THREATS.append(threat)
-            SIM_THREATS.append(threat)
-
-            send_single_threat(threat)
-
-        for i, threat in enumerate(SIM_THREATS):
-
-            angle = (
-                (t - 45) * (20 + i * 10)
-                + i * 72
-            )
-
-            r = 180 + 60 * math.sin(
-                (t - 45) * 0.7 + i
-            )
-
-            threat["global_x"] = (
-                CENTER[0]
-                + r * math.sin(math.radians(angle))
-            )
-
-            threat["global_y"] = (
-                CENTER[1]
-                - r * math.cos(math.radians(angle))
-            )
-
-            send_move_threat(threat)
-
-    # PHASE 5: remove all threats and reset sim
-    else:
-
-        for threat in THREATS:
-
-            tx = threat["global_x"]
-            ty = threat["global_y"]
-
-            gx = tx - CENTER[0]
-            gy = CENTER[1] - ty
-
-            send_ble_message(
-                f"{threat['id']},{gx},{gy},-1\n"
-            )
-
-        THREATS.clear()
-        SIM_THREATS.clear()
-
-        simulation_running = False
-
-        print("Simulation complete")
-
-# ------------------
-# BLE CALLBACK
-# ------------------
+def quaternion_to_yaw_deg(w, x, y, z):
+    siny_cosp = 2.0 * (w * z + x * y)
+    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+    return math.degrees(math.atan2(siny_cosp, cosy_cosp))
 
 def handle_ble_data(sender, data):
-
-    global latest_heading
-    global latest_quaternion
-    global last_printed_heading
-
+    global latest_heading, last_printed_heading
     try:
-
-        msg = data.decode().strip()
-
-        values = [float(v) for v in msg.split(",")]
-
+        values = [float(v) for v in data.decode().strip().split(",")]
         if len(values) != 4:
             return
-
         w, x, y, z = values
-
-        latest_quaternion = [w, x, y, z]
-
-        # print messages for debugging the received IMU data
-        # print(f"RAW: {msg}")
-        # print(f"Q = {w:.3f}, {x:.3f}, {y:.3f}, {z:.3f}")
-
-        yaw_deg = quaternion_to_yaw_deg(
-            w, x, y, z
-        )
-
-        if (
-            last_printed_heading is None or
-            abs(yaw_deg - last_printed_heading) > 5
-        ):
-            print(f"Heading: {yaw_deg:.1f}")
-            last_printed_heading = yaw_deg
-
+        yaw = quaternion_to_yaw_deg(w, x, y, z)
+        if last_printed_heading is None or abs(yaw - last_printed_heading) > 5:
+            print(f"Heading: {yaw:.1f}°")
+            last_printed_heading = yaw
         with heading_lock:
-            latest_heading = yaw_deg
-
+            latest_heading = yaw
     except Exception as e:
-        print("BAD IMU MESSAGE:", e)
+        print("BAD IMU:", e)
 
-def send_ble_message(message):
-
-    global ble_loop_ref
-
+def send_ble_message(msg):
     if ble_loop_ref is None:
         return
+    asyncio.run_coroutine_threadsafe(_ble_write(msg), ble_loop_ref)
 
-    asyncio.run_coroutine_threadsafe(
-        ble_send(message),
-        ble_loop_ref
-    )
-
-async def ble_send(message):
-
-    global ble_client
-
+async def _ble_write(msg):
     if ble_client is None:
         return
-
     try:
-
-        await ble_client.write_gatt_char(
-            BLE_TX_UUID,
-            message.encode()
-        )
-
+        await ble_client.write_gatt_char(BLE_TX_UUID, msg.encode())
     except Exception as e:
         print("BLE SEND FAILED:", e)
 
-# ------------------
-# BLE LOOP
-# ------------------
-
 async def ble_loop():
-
-    global BLE_ADDRESS
-
+    global BLE_ADDRESS, ble_client, ble_connected, ble_status
     print("Scanning for Argon...")
-
+    ble_status = "scanning"
     devices = await BleakScanner.discover(timeout=10.0)
-
     for d in devices:
-
-        print(f"{d.name} | {d.address}")
-
+        print(f"  {d.name} | {d.address}")
         if d.name and "Argon" in d.name:
             BLE_ADDRESS = d.address
             break
-
     if BLE_ADDRESS is None:
         print("Argon not found.")
+        ble_status = "not found"
         return
-
-    print(f"Connecting to {BLE_ADDRESS}")
-
+    print(f"Connecting to {BLE_ADDRESS}…")
     async with BleakClient(BLE_ADDRESS) as client:
-
-        global ble_client
-
-        ble_client = client
-
-        print("Connected to BLE device")
-
-        # print("\nSERVICES AND CHARACTERISTICS:")
-
-        # # the below for loop is just for debugging to find the correct characteristic UUIDs, it can be removed once the correct ones are identified and hardcoded above
-        # for service in client.services:
-
-        #     print(f"\nSERVICE: {service.uuid}")
-
-        #     for char in service.characteristics:
-
-        #         print(f"  CHARACTERISTIC: {char.uuid}")
-        #         print(f"  PROPERTIES: {char.properties}")
-
-        await client.start_notify(
-            BLE_RX_UUID,
-            handle_ble_data
-        )
-
+        ble_client    = client
+        ble_connected = True
+        ble_status    = "connected"
+        print("BLE connected.")
+        await client.start_notify(BLE_RX_UUID, handle_ble_data)
         while client.is_connected:
             await asyncio.sleep(0.1)
-        
-        print("BLE disconnected")
+        ble_connected = False
+        ble_status    = "disconnected"
+        print("BLE disconnected.")
 
-# ------------------
-# BLE THREAD
-# ------------------
-
-def start_ble():
-
+def _start_ble():
+    global ble_loop_ref
     try:
-        global ble_loop_ref
-
         ble_loop_ref = asyncio.new_event_loop()
-
         asyncio.set_event_loop(ble_loop_ref)
-
-        ble_loop_ref.run_until_complete(
-            ble_loop()
-        )
-
+        ble_loop_ref.run_until_complete(ble_loop())
     except Exception as e:
         print("BLE THREAD CRASHED:", e)
 
-ble_thread = threading.Thread(
-    target=start_ble,
-    daemon=True
-)
+threading.Thread(target=_start_ble, daemon=True).start()
 
-ble_thread.start()
+# ─── BLE THREAT MESSAGES ─────────────────────────────────────────────────────
 
+def ble_spawn(threat):
+    gx, gy = screen_to_global(threat["x"], threat["y"])
+    msg = f"{threat['id']},{gx:.0f},{gy:.0f},0"
+    print("TX (spawn):", msg)
+    send_ble_message(msg + "\n")
 
-# ------------------
-# MAIN LOOP
-# ------------------
+def ble_move(threat):
+    gx, gy = screen_to_global(threat["x"], threat["y"])
+    send_ble_message(f"{threat['id']},{gx:.0f},{gy:.0f},0\n")
+
+def ble_remove(threat):
+    gx, gy = screen_to_global(threat["x"], threat["y"])
+    msg = f"{threat['id']},{gx:.0f},{gy:.0f},-1"
+    print("TX (remove):", msg)
+    send_ble_message(msg + "\n")
+
+# ─── GAME LOGIC ──────────────────────────────────────────────────────────────
+
+def spawn_threat(template, wave_idx):
+    global next_threat_id
+    dist_px  = template["distance_m"] * METERS_TO_PX
+    speed_px = template["speed_mps"]  * METERS_TO_PX
+    x, y     = bearing_to_screen(template["angle_deg"], dist_px)
+    dx, dy   = CENTER[0] - x, CENTER[1] - y
+    norm     = math.hypot(dx, dy)
+    theta = math.atan2(CENTER[1] - y, x - CENTER[0])
+    is_spiral = random.random() < 0.2   # the probability of a spiral threat (vs straight-line) is 20%
+    threat   = {
+        "id":        next_threat_id,
+        "x":         x,
+        "y":         y,
+        "vx": speed_px * dx / norm,
+        "vy": speed_px * dy / norm,
+        "theta": theta,
+        "radius": math.hypot(x - CENTER[0], y - CENTER[1]),
+        "radial_speed": SPIRAL_RADIAL_SPEED,                 # inward motion
+        "omega": SPIRAL_OMEGA,           # angular drift (rad/s)
+        "mode": "spiral" if is_spiral else "straight",
+        "lock_on":   0.0,
+        "ble_timer": 0.0,    # throttle BLE position updates to ~10 Hz
+        "wave":      wave_idx,
+    }
+    next_threat_id += 1
+    threats.append(threat)
+    ble_spawn(threat)
+
+def neutralize_threat(threat):
+    global neutralized_count, screen_flash
+    neutralized_count += 1
+    threats.remove(threat)
+    animations.append({
+        "type": "neutralize",
+        "x": threat["x"], "y": threat["y"],
+        "timer": 0.8, "duration": 0.8,
+    })
+    screen_flash = {"color": (0, 200, 0), "timer": 0.3, "duration": 0.3}
+    ble_remove(threat)
+    print(f"Neutralized threat {threat['id']}")
+
+def shutdown_all_threats():
+    for t in list(threats):
+        ble_remove(t)
+    threats.clear()
+
+def terminal_hit(threat):
+    global misses, screen_flash
+    misses += 1
+    threats.remove(threat)
+    animations.append({
+        "type": "terminal",
+        "x": threat["x"], "y": threat["y"],
+        "timer": 0.9, "duration": 0.9,
+    })
+    screen_flash = {"color": (220, 0, 0), "timer": 0.5, "duration": 0.5}
+    ble_remove(threat)
+    print(f"TERMINAL HIT — threat {threat['id']}")
+
+def reset_game():
+    global state, game_time, threats, animations, screen_flash
+    global next_threat_id, waves_spawned, current_wave_num
+    global misses, neutralized_count, wave_notification
+    state             = STATE_INTRO
+    game_time         = 0.0
+    screen_flash      = None
+    next_threat_id    = 0
+    waves_spawned     = 0
+    current_wave_num  = 0
+    misses            = 0
+    neutralized_count = 0
+    wave_notification = None
+    threats.clear()
+    animations.clear()
+
+# ─── DRAWING ─────────────────────────────────────────────────────────────────
+
+def draw_range_rings(surf):
+    for m in RANGE_RINGS_M:
+        r = int(m * METERS_TO_PX)
+        pygame.draw.circle(surf, (55, 55, 55), CENTER, r, 1)
+        label = font_small.render(f"{m}m", True, (75, 75, 75))
+        surf.blit(label, (CENTER[0] + r + 3, CENTER[1] - 10))
+
+def draw_dashed_circle(surf, color, center, radius, dashes=32, width=2):
+    for i in range(dashes):
+        a0 = 2 * math.pi *  i      / dashes
+        a1 = 2 * math.pi * (i + 0.5) / dashes
+        x0 = int(center[0] + radius * math.cos(a0))
+        y0 = int(center[1] + radius * math.sin(a0))
+        x1 = int(center[0] + radius * math.cos(a1))
+        y1 = int(center[1] + radius * math.sin(a1))
+        pygame.draw.line(surf, color, (x0, y0), (x1, y1), width)
+
+def draw_sector_shape(surf, center, start_deg, end_deg, inner_r, outer_r,
+                      color, border=(120, 120, 120), bwidth=2, res=20):
+    pts = []
+    for i in range(res + 1):
+        a = math.radians(start_deg + (end_deg - start_deg) * i / res)
+        pts.append((center[0] + outer_r * math.sin(a),
+                    center[1] - outer_r * math.cos(a)))
+    for i in range(res, -1, -1):
+        a = math.radians(start_deg + (end_deg - start_deg) * i / res)
+        pts.append((center[0] + inner_r * math.sin(a),
+                    center[1] - inner_r * math.cos(a)))
+    pygame.draw.polygon(surf, color, pts)
+    pygame.draw.polygon(surf, border, pts, bwidth)
+
+def draw_sector_wheel(surf, heading_deg, active_sectors, locked_on):
+    for s in range(NUM_MOTORS):
+        a0 = heading_deg - SECTOR_SIZE / 2 + s * SECTOR_SIZE
+        a1 = a0 + SECTOR_SIZE
+        if s == 0 and locked_on:
+            color = (80, 210, 80)    # green — actively locking on
+        elif s in active_sectors:
+            color = (255, 140, 0)    # orange — threat present
+        elif s == 0:
+            color = (60, 60, 95)     # subtle highlight: user's facing direction
+        else:
+            color = (50, 50, 50)
+        draw_sector_shape(surf, CENTER, a0, a1,
+                          SECTOR_INNER_RADIUS, SECTOR_OUTER_RADIUS, color)
+
+def draw_cardinal_labels(surf):
+    """Draw fixed N/E/S/W labels just outside the sector ring."""
+    dirs = [("N", 0), ("E", 90), ("S", 180), ("W", 270)]
+    r = SECTOR_OUTER_RADIUS + 18
+    for label_str, bearing in dirs:
+        bx, by = bearing_to_screen(bearing, r)
+        lbl = font_small.render(label_str, True, (150, 150, 150))
+        surf.blit(lbl, (int(bx) - lbl.get_width() // 2,
+                        int(by) - lbl.get_height() // 2))
+
+def draw_lock_on_arc(surf, threat):
+    """Yellow-to-green clockwise arc around a threat showing lock-on progress."""
+    progress = threat["lock_on"] / LOCK_ON_DURATION
+    if progress <= 0:
+        return
+    cx, cy = int(threat["x"]), int(threat["y"])
+    r      = 16
+    n      = max(int(30 * progress), 3)
+    sweep  = 2 * math.pi * progress
+    pts    = []
+    for i in range(n + 1):
+        t = sweep * i / n           # clockwise from 12 o'clock
+        pts.append((cx + r * math.sin(t), cy - r * math.cos(t)))
+    red   = int(255 * (1.0 - progress))
+    color = (red, 255, 0)
+    if len(pts) >= 2:
+        pygame.draw.lines(surf, color, False, pts, 3)
+
+def draw_threats(surf):
+    for t in threats:
+        tx, ty = int(t["x"]), int(t["y"])
+        pygame.draw.circle(surf, (220, 30, 30), (tx, ty), 10)
+        draw_lock_on_arc(surf, t)
+        lbl = font_small.render(str(t["id"]), True, (255, 255, 255))
+        surf.blit(lbl, (tx + 13, ty - 10))
+
+def draw_animations(surf):
+    for anim in animations:
+        p  = 1.0 - anim["timer"] / anim["duration"]   # 0 → 1 as anim plays
+        cx = int(anim["x"])
+        cy = int(anim["y"])
+        if anim["type"] == "neutralize":
+            r  = max(1, int(10 + p * 65))
+            r2 = max(1, int(10 + p * 32))
+            pygame.draw.circle(surf, (0, 255, 90),   (cx, cy), r,  3)
+            pygame.draw.circle(surf, (180, 255, 180), (cx, cy), r2, 2)
+        elif anim["type"] == "terminal":
+            r  = max(1, int(p * 55))
+            r2 = max(1, int(p * 28))
+            pygame.draw.circle(surf, (255, 50,  0),   (cx, cy), r,  3)
+            pygame.draw.circle(surf, (255, 200, 0),   (cx, cy), r2, 2)
+
+def draw_user(surf):
+    pygame.draw.circle(surf, (255, 255, 255), CENTER, 20)
+
+def draw_heading_arrow(surf, heading_deg):
+    hx, hy = bearing_to_screen(heading_deg, 60)
+    pygame.draw.line(surf, (0, 255, 0), CENTER, (int(hx), int(hy)), 4)
+
+def draw_screen_flash(surf):
+    if screen_flash is None:
+        return
+    ratio = screen_flash["timer"] / screen_flash["duration"]
+    alpha = max(0, min(180, int(180 * ratio)))
+    flash = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+    r, g, b = screen_flash["color"]
+    flash.fill((r, g, b, alpha))
+    surf.blit(flash, (0, 0))
+
+def draw_hud(surf):
+    # BLE status — top right
+    ble_color_map = {
+        "scanning":     (255, 200,  0),
+        "connected":    (  0, 220,  0),
+        "not found":    (200,  80, 80),
+        "disconnected": (200, 100,  0),
+    }
+    ble_col  = ble_color_map.get(ble_status, (200, 200, 200))
+    ble_text = font_small.render(f"BLE: {ble_status}", True, ble_col)
+    surf.blit(ble_text, (WIDTH - ble_text.get_width() - 10, 10))
+
+    # Wave / score — top left
+    wave_str  = f"Wave {current_wave_num} / {len(WAVE_SCHEDULE)}"
+    score_str = f"Neutralized: {neutralized_count}   Misses: {misses}"
+    hdg_str   = f"Heading: {user_heading_deg % 360:.0f}°"
+    surf.blit(font_small.render(wave_str,  True, (200, 200, 200)), (10, 10))
+    surf.blit(font_small.render(score_str, True, (200, 200, 200)), (10, 32))
+    surf.blit(font_small.render(hdg_str,   True, (140, 210, 140)), (10, 54))
+
+    # Keyboard hint when BLE unavailable — bottom centre
+    # if not ble_connected:
+    #     hint = font_small.render(
+    #         "← → arrow keys to rotate heading (no BLE)", True, (110, 110, 110)
+    #     )
+    #     surf.blit(hint, (WIDTH // 2 - hint.get_width() // 2, HEIGHT - 28))
+
+def draw_wave_notification(surf):
+    if wave_notification is None:
+        return
+    # Fade in quickly, hold, then fade out
+    p     = wave_notification["timer"] / 2.0
+    alpha = max(0, min(255, int(255 * min(p * 5, 1.0))))
+    text  = font_large.render(wave_notification["label"] + " INCOMING", True, (255, 210, 0))
+    text.set_alpha(alpha)
+    surf.blit(text, (WIDTH  // 2 - text.get_width()  // 2,
+                     HEIGHT // 2 - SECTOR_OUTER_RADIUS - 60))
+
+def draw_countdown(surf, seconds_remaining):
+    n    = math.ceil(seconds_remaining)
+    text = font_med.render(f"Simulation begins in {n}...", True, (180, 180, 180))
+    surf.blit(text, (WIDTH  // 2 - text.get_width()  // 2,
+                     HEIGHT // 2 + SECTOR_OUTER_RADIUS + 20))
+
+def draw_intro(surf):
+    overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+    overlay.fill((0, 0, 0, 185))
+    surf.blit(overlay, (0, 0))
+
+    title = font_xl.render("THREAT SIMULATION", True, (255, 255, 255))
+    surf.blit(title, (WIDTH // 2 - title.get_width() // 2, 120))
+
+    lines = [
+        "Threats approach from multiple directions across 4 waves.",
+        "Face a threat sector for 3 seconds to neutralize it.",
+        "Don't let threats reach the danger zone (inner red ring).",
+        "",
+        "Each new wave spawns on a timer — threats can overlap.",
+        "Prioritize the closest threats first.",
+        #"",
+        #"← → arrow keys rotate heading if no BLE device connected.",
+    ]
+    y = 240
+    for line in lines:
+        t = font_med.render(line, True, (195, 195, 195))
+        surf.blit(t, (WIDTH // 2 - t.get_width() // 2, y))
+        y += 38
+
+    if (pygame.time.get_ticks() // 500) % 2:
+        prompt = font_large.render("PRESS SPACE TO BEGIN", True, (255, 220, 0))
+        surf.blit(prompt, (WIDTH // 2 - prompt.get_width() // 2, y + 20))
+
+def draw_end(surf):
+    overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+    overlay.fill((0, 0, 0, 200))
+    surf.blit(overlay, (0, 0))
+
+    if misses == 0:
+        result_color = (0, 255, 110)
+        result_text  = "MISSION COMPLETE"
+    else:
+        result_color = (255, 60, 60)
+        result_text  = "MISSION FAILED"
+
+    title = font_xl.render(result_text, True, result_color)
+    surf.blit(title, (WIDTH // 2 - title.get_width() // 2, 190))
+
+    stats = [
+        f"Threats neutralized:  {neutralized_count} / {TOTAL_THREATS}",
+        f"Threats missed:       {misses} / {TOTAL_THREATS}",
+    ]
+    y = 320
+    for s in stats:
+        t = font_med.render(s, True, (220, 220, 220))
+        surf.blit(t, (WIDTH // 2 - t.get_width() // 2, y))
+        y += 52
+
+    if (pygame.time.get_ticks() // 600) % 2:
+        prompt = font_med.render("PRESS SPACE TO RESTART", True, (190, 190, 190))
+        surf.blit(prompt, (WIDTH // 2 - prompt.get_width() // 2, y + 30))
+
+# ─── MAIN LOOP ───────────────────────────────────────────────────────────────
 
 running = True
 
 while running:
+    dt = clock.tick(FPS) / 1000.0
 
-    # ------------------
-    # EVENTS
-    # ------------------
-
+    # ── events ────────────────────────────────────────────────────────────
     for event in pygame.event.get():
-
-        # quit
         if event.type == pygame.QUIT:
             running = False
-
-        # ------------------
-        # SPACE BAR
-        # ------------------
-        if event.type == pygame.KEYDOWN:
-
-            if event.key == pygame.K_SPACE:
-
-                simulation_running = not simulation_running
-
-                if simulation_running:
-
-                    simulation_start_time = pygame.time.get_ticks()
-
-                    THREATS.clear()
-                    SIM_THREATS.clear()
-                    NEXT_THREAT_ID = 0
-
-                    print("Simulation started")
-
-                else:
-                    print("Simulation paused")
-
-        # ------------------
-        # MOUSE DOWN
-        # ------------------
-
-        if event.type == pygame.MOUSEBUTTONDOWN:
-            
-            if simulation_running:
-                continue   # skip ALL mouse clicks during simulation
-
-            mx, my = event.pos
-
-            # ------------------
-            # LEFT CLICK
-            # ------------------
-
-            if event.button == 1:
-
-                clicked_existing = False
-
-                # see if clicking existing threat
-                for i, threat in enumerate(THREATS):
-
-                    tx = threat["global_x"]
-                    ty = threat["global_y"]
-
-                    dist = math.hypot(tx - mx, ty - my)
-
-                    if dist < 15:
-
-                        drag_index = i
-                        clicked_existing = True
-                        break
-
-                # otherwise create new threat
-                if not clicked_existing:
-
-                    new_threat = {
-                        "id": NEXT_THREAT_ID,
-                        "global_x": mx,
-                        "global_y": my
-                    }
-
-                    THREATS.append(new_threat)
-
-                    send_single_threat(new_threat)
-
-                    NEXT_THREAT_ID += 1
-
-            # ------------------
-            # RIGHT CLICK
-            # ------------------
-
-            if event.button == 3:
-
-                clicked_index = None
-
-                # check if clicking existing threat
-                for i, threat in enumerate(THREATS):
-
-                    tx = threat["global_x"]
-                    ty = threat["global_y"]
-
-                    dist = math.hypot(tx - mx, ty - my)
-
-                    if dist < 15:
-                        clicked_index = i
-                        break
-
-                # ------------------
-                # REMOVE SINGLE THREAT
-                # ------------------
-
-                if clicked_index is not None:
-
-                    threat = THREATS[clicked_index]
-
-                    threat_id = threat["id"]
-
-                    tx = threat["global_x"]
-                    ty = threat["global_y"]
-
-                    global_x = tx - CENTER[0]
-                    global_y = CENTER[1] - ty
-
-                    removal_msg = f"{threat_id},{global_x},{global_y},-1"
-
-                    print("TX:", removal_msg)
-                    send_ble_message(removal_msg + "\n")
-
-                    THREATS.pop(clicked_index)
-
-                # ------------------
-                # REMOVE ALL THREATS
-                # ------------------
-
-                else:
-
-                    for threat in THREATS:
-
-                        threat_id = threat["id"]
-
-                        tx = threat["global_x"]
-                        ty = threat["global_y"]
-
-                        global_x = tx - CENTER[0]
-                        global_y = CENTER[1] - ty
-
-                        removal_msg = f"{threat_id},{global_x},{global_y},-1"
-
-                        print("TX:", removal_msg)
-                        send_ble_message(removal_msg + "\n")
-                        # uncomment for hardware
-                        # ser.write((removal_msg + "\n").encode())
-
-                    THREATS.clear()
-        # ------------------
-        # MOUSE UP
-        # ------------------
-
-        if event.type == pygame.MOUSEBUTTONUP:
-
-            if event.button == 1:
-                drag_index = None
-
-        # ------------------
-        # MOUSE MOTION
-        # ------------------
-
-        if event.type == pygame.MOUSEMOTION:
-
-            if drag_index is not None:
-
-                threat = THREATS[drag_index]
-
-                threat["global_x"] = event.pos[0]
-                threat["global_y"] = event.pos[1]
-
-                send_move_threat(threat)
-
-    # ------------------
-    # HEADING INPUT
-    # ------------------
-
-    # use BLE heading instead of keyboard:
-    with heading_lock:
-        user_heading_deg = latest_heading
-
-    # call simulation function if simulation is running:
-    if simulation_running:
-        update_simulation()
-
-    # --------- keyboard input
-    # keys = pygame.key.get_pressed()
-
-    # if keys[pygame.K_a]:
-    #     user_heading_deg += 2
-
-    # if keys[pygame.K_d]:
-    #     user_heading_deg -= 2
-    # --------- keyboard input
-
-    # ------------------
-    # DRAW
-    # ------------------
-
-    screen.fill((20, 20, 20))
-
-    # ------------------
-    # SECTOR HIGHLIGHTS
-    # ------------------
-    active_sectors = get_active_sectors(THREATS, user_heading_deg)
-
-    draw_sector_map(screen, CENTER, user_heading_deg, active_sectors)
-
-    # ------------------
-    # USER
-    # ------------------
-
-    pygame.draw.circle(
-        screen,
-        (255, 255, 255),
-        CENTER,
-        20
+        if event.type == pygame.KEYDOWN and event.key == pygame.K_SPACE:
+            if state == STATE_INTRO:
+                state     = STATE_PLAYING
+                game_time = 0.0
+            elif state == STATE_END:
+                reset_game()   # returns to STATE_INTRO for next user
+
+    # ── update ────────────────────────────────────────────────────────────
+    if state == STATE_PLAYING:
+        game_time += dt
+
+        # Heading: BLE takes priority; fall back to arrow keys for testing
+        with heading_lock:
+            ble_hdg = latest_heading
+        if ble_connected:
+            user_heading_deg = ble_hdg
+        else:
+            keys = pygame.key.get_pressed()
+            if keys[pygame.K_LEFT]:
+                user_heading_deg -= 90 * dt
+            if keys[pygame.K_RIGHT]:
+                user_heading_deg += 90 * dt
+            user_heading_deg %= 360
+
+        # Wave spawning on fixed timer
+        while waves_spawned < len(WAVE_SCHEDULE):
+            wave = WAVE_SCHEDULE[waves_spawned]
+            if game_time < wave["spawn_time"]:
+                break
+            for tmpl in wave["threats"]:
+                spawn_threat(tmpl, waves_spawned)
+            current_wave_num  = waves_spawned + 1
+            wave_notification = {"label": wave["label"], "timer": 2.0}
+            waves_spawned    += 1
+
+        # Wave notification fade timer
+        if wave_notification:
+            wave_notification["timer"] -= dt
+            if wave_notification["timer"] <= 0:
+                wave_notification = None
+
+        # Update each active threat
+        for t in list(threats):
+            if t["mode"] == "straight":
+                # normal linear motion
+                t["x"] += t["vx"] * dt
+                t["y"] += t["vy"] * dt
+
+            else:
+                # spiral motion
+                t["radius"] -= t["radial_speed"] * dt
+                t["theta"] += t["omega"] * dt
+
+                t["x"] = CENTER[0] + t["radius"] * math.sin(t["theta"])
+                t["y"] = CENTER[1] - t["radius"] * math.cos(t["theta"])
+
+            # BLE position update throttled to ~10 Hz
+            t["ble_timer"] -= dt
+            if t["ble_timer"] <= 0:
+                ble_move(t)
+                t["ble_timer"] = 0.1
+
+            # Lock-on: accumulate only when sector == 0 (straight ahead), else full reset
+            if get_threat_sector(t, user_heading_deg) == 0:
+                t["lock_on"] += dt
+            else:
+                t["lock_on"] = 0.0
+
+            if t["lock_on"] >= LOCK_ON_DURATION:
+                neutralize_threat(t)
+                continue
+
+            if math.hypot(t["x"] - CENTER[0], t["y"] - CENTER[1]) <= TERMINAL_PX:
+                terminal_hit(t)
+                continue
+
+        # Animation timers
+        for a in list(animations):
+            a["timer"] -= dt
+            if a["timer"] <= 0:
+                animations.remove(a)
+
+        # Screen flash timer
+        if screen_flash:
+            screen_flash["timer"] -= dt
+            if screen_flash["timer"] <= 0:
+                screen_flash = None
+
+        # End condition: all waves spawned and all threats resolved
+        if waves_spawned >= len(WAVE_SCHEDULE) and not threats:
+            shutdown_all_threats()
+            state = STATE_END
+
+    # ── draw ──────────────────────────────────────────────────────────────
+    screen_surf.fill((20, 20, 20))
+
+    draw_range_rings(screen_surf)
+    draw_dashed_circle(screen_surf, (180, 40, 40), CENTER, TERMINAL_PX,
+                       dashes=24, width=2)
+    draw_cardinal_labels(screen_surf)
+
+    active_sectors = get_active_sectors(threats, user_heading_deg)
+    locked_on      = any(
+        get_threat_sector(t, user_heading_deg) == 0 and t["lock_on"] > 0
+        for t in threats
     )
+    draw_sector_wheel(screen_surf, user_heading_deg, active_sectors, locked_on)
 
-    # ------------------
-    # HEADING ARROW
-    # ------------------
+    draw_animations(screen_surf)
+    draw_user(screen_surf)
+    draw_heading_arrow(screen_surf, user_heading_deg)
+    draw_threats(screen_surf)
 
-    hx = CENTER[0] + 60 * math.sin(
-        math.radians(user_heading_deg)
-    )
+    draw_screen_flash(screen_surf)
+    draw_hud(screen_surf)
+    draw_wave_notification(screen_surf)
 
-    hy = CENTER[1] - 60 * math.cos(
-        math.radians(user_heading_deg)
-    )
+    # Pre-wave countdown (before wave 1 spawns)
+    if state == STATE_PLAYING and waves_spawned == 0:
+        remaining = WAVE_SCHEDULE[0]["spawn_time"] - game_time
+        if remaining > 0:
+            draw_countdown(screen_surf, remaining)
 
-    pygame.draw.line(
-        screen,
-        (0, 255, 0),
-        CENTER,
-        (hx, hy),
-        4
-    )
-
-    # ------------------
-    # THREATS
-    # ------------------
-
-    for threat in THREATS:
-
-        tx = threat["global_x"]
-        ty = threat["global_y"]
-
-        pygame.draw.circle(
-            screen,
-            (255, 0, 0),
-            (tx, ty),
-            10
-        )
-
-        # optional: draw threat ID
-        font = pygame.font.SysFont(None, 24)
-
-        text = font.render(
-            str(threat["id"]),
-            True,
-            (255, 255, 255)
-        )
-
-        screen.blit(text, (tx + 12, ty - 12))
+    if state == STATE_INTRO:
+        draw_intro(screen_surf)
+    elif state == STATE_END:
+        draw_end(screen_surf)
 
     pygame.display.flip()
-
-    clock.tick(30)  # 30 FPS
 
 pygame.quit()
