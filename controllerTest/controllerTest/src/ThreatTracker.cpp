@@ -1,5 +1,47 @@
 #include "ThreatTracker.h"
 
+
+
+ThreatTracker::ThreatTracker() {
+    // initialize signatures
+    struct signature
+    {
+        unsigned long* data;
+        size_t len;
+    };
+    #define ARRAY_LEN(x) (sizeof(x) / sizeof((x)[0]))
+
+    unsigned long sig0[] = {};
+    unsigned long sig1[] = {};
+    unsigned long sig2[] = {};
+    unsigned long sig3[] = {};
+    unsigned long sig4[] = {};
+    unsigned long sig5[] = {};
+    unsigned long sig6[] = {};
+    unsigned long sig7[] = {};
+    unsigned long sig8[] = {};
+    unsigned long sig9[] = {};
+    size_t numSigs = 20;
+    signature sigs[numSigs] = 
+    {
+        {sig0, ARRAY_LEN(sig0)},
+        {sig1, ARRAY_LEN(sig0)},
+        {sig2, ARRAY_LEN(sig0)},
+        {sig3, ARRAY_LEN(sig0)},
+        {sig4, ARRAY_LEN(sig0)},
+        {sig5, ARRAY_LEN(sig0)},
+        {sig6, ARRAY_LEN(sig0)},
+        {sig7, ARRAY_LEN(sig0)},
+        {sig8, ARRAY_LEN(sig0)},
+        {sig9, ARRAY_LEN(sig0)},
+    };
+    
+    for (size_t i = 0; i < 10;i++) {
+        Threats[0].signature = HapticSignature(sigs[i].data, sigs[i].len);
+    }
+    
+}
+
 // Callback function for Rx BLE 
 // static
 void ThreatTracker::rx_callback( const uint8_t* data,  
@@ -58,7 +100,6 @@ void ThreatTracker::update() {
     
     if (numMessages == 0) return;
 
-    
     for (size_t i = 0; i < numMessages; i++) {
         String localStr = localStrArray[i];
 
@@ -119,7 +160,7 @@ void ThreatTracker::update() {
     }
 }
 
-int ThreatTracker::getActiveThreats(volatile Threat* activeList[], int maxListSize) {
+int ThreatTracker::getActiveThreats(Threat* activeList[], int maxListSize) {
     int count = 0;
     for (int i = 0; i < maxThreats && count < maxListSize; i++) {
         if (Threats[i].active) {

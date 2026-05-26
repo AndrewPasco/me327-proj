@@ -51,7 +51,7 @@ float normalizeAngle(float angle) {
 }
 
 void HapticBelt::renderHaptics(float currentRelativeYaw) {
-    volatile Threat* activeThreats[10];
+    Threat* activeThreats[10];
     int count = ThreatTrack.getActiveThreats(activeThreats, 10);
     
     if (count == 0) {
@@ -81,6 +81,9 @@ void HapticBelt::renderHaptics(float currentRelativeYaw) {
         float range = sqrt(x*x + y*y);
         float intensity = constrain(1.0f - (range / 400.0f), 0.1f, 1.0f);
 
-        motorDriver.triggerMotor(motorIndex, intensity);
+        if ((activeThreats[i]->signature).is_active()) {
+            motorDriver.triggerMotor(motorIndex, intensity);
+        }
+        
     }
 }
