@@ -174,4 +174,5 @@ For each active threat:
 
 ## License
 
+MIT License
 ME327 Academic Project, Stanford University, Spring 2026.
