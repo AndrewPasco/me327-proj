@@ -168,7 +168,7 @@ def handle_ble_data(sender, data):
         if len(values) != 4:
             return
         w, x, y, z = values
-        yaw = quaternion_to_yaw_deg(w, x, y, z)
+        yaw = -quaternion_to_yaw_deg(w, x, y, z)
         if last_printed_heading is None or abs(yaw - last_printed_heading) > 5:
             print(f"Heading: {yaw:.1f}°")
             last_printed_heading = yaw
@@ -480,8 +480,8 @@ def draw_intro(surf):
         "",
         "Each new wave spawns on a timer — threats can overlap.",
         "Prioritize the closest threats first.",
-        "",
-        "← → arrow keys rotate heading if no BLE device connected.",
+        #"",
+        #"← → arrow keys rotate heading if no BLE device connected.",
     ]
     y = 240
     for line in lines:

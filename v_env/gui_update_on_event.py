@@ -322,7 +322,8 @@ def handle_ble_data(sender, data):
         # print(f"RAW: {msg}")
         # print(f"Q = {w:.3f}, {x:.3f}, {y:.3f}, {z:.3f}")
 
-        yaw_deg = quaternion_to_yaw_deg(
+        # changed
+        yaw_deg = -quaternion_to_yaw_deg(
             w, x, y, z
         )
 
