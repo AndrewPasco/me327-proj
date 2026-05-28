@@ -69,7 +69,7 @@ void HapticBelt::renderHaptics(float currentRelativeYaw) {
         
         // +x is right, +y is up (forward in python GUI)
         // atan2(x,y) gives 0 for y-axis, positive for x-axis -> maps to azimuth
-        float targetAzimuth = atan2(x, y) * 180.0f / M_PI;
+        float targetAzimuth = atan2(y, x) * 180.0f / M_PI - 90.0f;
         
         float error = targetAzimuth - currentRelativeYaw;
         error = fmod(error + 540.0f, 360.0f) - 180.0f; 

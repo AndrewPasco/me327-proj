@@ -69,12 +69,12 @@ Quat BeltIMU::get_quaternion () {
     // to find quaternion relative to initial orientation
     Quat reorientedQuat = Qmultiply( newQuat, Qconj(initQ) );
     
-    if (justReset) {
-        // Find offsetQ such that Qmultiply(reorientedQuat, offsetQ) == oldQuat
-        // offsetQ = Qmultiply(Qconj(reorientedQuat), oldQuat)
-        offsetQ = Qmultiply(Qconj(reorientedQuat), oldQuat);
-        justReset = false;
-    }
+    // if (justReset) {
+    //     // Find offsetQ such that Qmultiply(reorientedQuat, offsetQ) == oldQuat
+    //     // offsetQ = Qmultiply(Qconj(reorientedQuat), oldQuat)
+    //     offsetQ = Qmultiply(Qconj(reorientedQuat), oldQuat);
+    //     justReset = false;
+    // }
     
     // Apply offset
     Quat finalQuat = Qmultiply(reorientedQuat, offsetQ);
