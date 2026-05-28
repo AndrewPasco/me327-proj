@@ -36,38 +36,38 @@ WAVE_SCHEDULE = [
         "spawn_time": 3.0,
         "label": "WAVE 1",
         "threats": [
-            {"angle_deg":   0, "speed_mps": 16, "distance_m": 400},
-            {"angle_deg": 175, "speed_mps": 16, "distance_m": 400},
+            {"angle_deg":   0, "speed_mps": 16, "distance_m": 400, "offset_m":   0},
+            {"angle_deg": 175, "speed_mps": 16, "distance_m": 400, "offset_m":   0},
         ],
     },
     {
         "spawn_time": 12.0,
         "label": "WAVE 2",
         "threats": [
-            {"angle_deg":  45, "speed_mps": 19, "distance_m": 500},
-            {"angle_deg": 180, "speed_mps": 19, "distance_m": 500},
-            {"angle_deg": 315, "speed_mps": 19, "distance_m": 500},
+            {"angle_deg":  45, "speed_mps": 19, "distance_m": 500, "offset_m":   0},
+            {"angle_deg": 180, "speed_mps": 19, "distance_m": 500, "offset_m":   0},
+            {"angle_deg": 315, "speed_mps": 19, "distance_m": 500, "offset_m":  30},
         ],
     },
     {
         "spawn_time": 21.0,
         "label": "WAVE 3",
         "threats": [
-            {"angle_deg":  30, "speed_mps": 22, "distance_m": 500},
-            {"angle_deg": 120, "speed_mps": 22, "distance_m": 500},
-            {"angle_deg": 240, "speed_mps": 22, "distance_m": 500},
-            {"angle_deg": 330, "speed_mps": 22, "distance_m": 500},
+            {"angle_deg":  30, "speed_mps": 22, "distance_m": 500, "offset_m":   0},
+            {"angle_deg": 120, "speed_mps": 22, "distance_m": 500, "offset_m":  35},
+            {"angle_deg": 210, "speed_mps": 20, "distance_m": 500, "offset_m": 120},  # diagonal — sweeps NE of user
+            {"angle_deg": 330, "speed_mps": 22, "distance_m": 500, "offset_m":   0},
         ],
     },
     {
         "spawn_time": 30.0,
         "label": "WAVE 4",
         "threats": [
-            {"angle_deg":  10, "speed_mps": 25, "distance_m": 500},
-            {"angle_deg":  82, "speed_mps": 25, "distance_m": 500},
-            {"angle_deg": 154, "speed_mps": 25, "distance_m": 500},
-            {"angle_deg": 226, "speed_mps": 25, "distance_m": 500},
-            {"angle_deg": 298, "speed_mps": 25, "distance_m": 500},
+            {"angle_deg":  10, "speed_mps": 21, "distance_m": 500, "offset_m":  40},
+            {"angle_deg":  82, "speed_mps": 21, "distance_m": 500, "offset_m": -40},
+            {"angle_deg": 154, "speed_mps": 21, "distance_m": 500, "offset_m":  40},
+            {"angle_deg": 226, "speed_mps": 21, "distance_m": 500, "offset_m": -40},
+            {"angle_deg": 298, "speed_mps": 19, "distance_m": 500, "offset_m": 120},  # diagonal — sweeps SE of user
         ],
     },
 ]
@@ -149,17 +149,31 @@ def spawn_threat(template, wave_idx):
     dist_px  = template["distance_m"] * METERS_TO_PX
     speed_px = template["speed_mps"]  * METERS_TO_PX
     x, y     = bearing_to_screen(template["angle_deg"], dist_px)
-    dx, dy   = CENTER[0] - x, CENTER[1] - y
-    norm     = math.hypot(dx, dy)
+
+    # Offset the aim point perpendicularly so the threat crosses rather than
+    # flies straight at the user. offset_m > 0 = clockwise, < 0 = counter-clockwise.
+    offset_m     = template.get("offset_m", 0)
+    dx_in, dy_in = CENTER[0] - x, CENTER[1] - y
+    approach_len = math.hypot(dx_in, dy_in)
+    perp_x = -dy_in / approach_len   # 90° clockwise rotation of approach vector
+    perp_y =  dx_in / approach_len
+    target_x = CENTER[0] + perp_x * offset_m * METERS_TO_PX
+    target_y = CENTER[1] + perp_y * offset_m * METERS_TO_PX
+    dx = target_x - x
+    dy = target_y - y
+    norm = math.hypot(dx, dy)
+
     threat   = {
-        "id":        next_threat_id,
-        "x":         x,
-        "y":         y,
-        "vx":        speed_px * dx / norm,
-        "vy":        speed_px * dy / norm,
-        "lock_on":   0.0,
-        "ble_timer": 0.0,
-        "wave":      wave_idx,
+        "id":            next_threat_id,
+        "x":             x,
+        "y":             y,
+        "vx":            speed_px * dx / norm,
+        "vy":            speed_px * dy / norm,
+        "lock_on":       0.0,
+        "ble_timer":     0.0,
+        "wave":          wave_idx,
+        "diagonal":      abs(offset_m) * METERS_TO_PX > TERMINAL_PX,  # passes outside danger zone
+        "entered_range": False,  # set True once inside outer ring, for exit detection
     }
     next_threat_id += 1
     threats.append(threat)
@@ -238,20 +252,21 @@ def draw_sector_shape(surf, center, start_deg, end_deg, inner_r, outer_r,
     pygame.draw.polygon(surf, color, pts)
     pygame.draw.polygon(surf, border, pts, bwidth)
 
-def draw_sector_wheel(surf, heading_deg, active_sectors, locked_on):
-    for s in range(NUM_MOTORS):
-        a0 = heading_deg - SECTOR_SIZE / 2 + s * SECTOR_SIZE
-        a1 = a0 + SECTOR_SIZE
-        if s == 0 and locked_on:
-            color = (80, 210, 80)
-        elif s in active_sectors:
-            color = (255, 140, 0)
-        elif s == 0:
-            color = (60, 60, 95)
-        else:
-            color = (50, 50, 50)
-        draw_sector_shape(surf, CENTER, a0, a1,
-                          SECTOR_INNER_RADIUS, SECTOR_OUTER_RADIUS, color)
+def draw_forward_cone(surf, heading_deg, threats):
+    """Single 45° forward wedge — colour shifts orange→green as lock-on builds."""
+    a0      = heading_deg - SECTOR_SIZE / 2
+    a1      = heading_deg + SECTOR_SIZE / 2
+    in_cone = [t for t in threats if get_threat_sector(t, heading_deg) == 0]
+    if in_cone:
+        best     = max(t["lock_on"] for t in in_cone)
+        progress = best / LOCK_ON_DURATION
+        color    = (int(255 * (1.0 - progress)), int(140 + 70 * progress), 0)
+        border   = (80, 160, 80) if progress > 0.1 else (160, 100, 0)
+    else:
+        color  = (55, 55, 85)
+        border = (90, 90, 110)
+    draw_sector_shape(surf, CENTER, a0, a1,
+                      SECTOR_INNER_RADIUS, SECTOR_OUTER_RADIUS, color, border)
 
 def draw_cardinal_labels(surf):
     r = SECTOR_OUTER_RADIUS + 18
@@ -277,7 +292,9 @@ def draw_lock_on_arc(surf, threat):
 def draw_threats(surf):
     for t in threats:
         tx, ty = int(t["x"]), int(t["y"])
-        pygame.draw.circle(surf, (220, 30, 30), (tx, ty), 10)
+        # Diagonal threats are amber; direct/crossing threats are red
+        color = (220, 150, 20) if t.get("diagonal") else (220, 30, 30)
+        pygame.draw.circle(surf, color, (tx, ty), 10)
         draw_lock_on_arc(surf, t)
         lbl = font_small.render(str(t["id"]), True, (255, 255, 255))
         surf.blit(lbl, (tx + 13, ty - 10))
@@ -428,16 +445,28 @@ while running:
             t["x"] += t["vx"] * dt
             t["y"] += t["vy"] * dt
 
+            # Lock-on: accumulate when facing, decay at 2× speed when not
             if get_threat_sector(t, user_heading_deg) == 0:
-                t["lock_on"] += dt
+                t["lock_on"] = min(t["lock_on"] + dt, LOCK_ON_DURATION)
             else:
-                t["lock_on"] = 0.0
+                t["lock_on"] = max(0.0, t["lock_on"] - dt * 2)
 
             if t["lock_on"] >= LOCK_ON_DURATION:
                 neutralize_threat(t)
                 continue
 
-            if math.hypot(t["x"] - CENTER[0], t["y"] - CENTER[1]) <= TERMINAL_PX:
+            dist = math.hypot(t["x"] - CENTER[0], t["y"] - CENTER[1])
+
+            # Track when threat enters the outer detection ring
+            if not t["entered_range"] and dist < SECTOR_OUTER_RADIUS:
+                t["entered_range"] = True
+
+            if dist <= TERMINAL_PX:
+                terminal_hit(t)
+                continue
+
+            # Diagonal threat has exited the outer ring after passing through — escaped
+            if t["entered_range"] and dist > SECTOR_OUTER_RADIUS:
                 terminal_hit(t)
                 continue
 
@@ -461,12 +490,7 @@ while running:
     draw_dashed_circle(screen_surf, (180, 40, 40), CENTER, TERMINAL_PX, dashes=24, width=2)
     draw_cardinal_labels(screen_surf)
 
-    active_sectors = get_active_sectors(threats, user_heading_deg)
-    locked_on      = any(
-        get_threat_sector(t, user_heading_deg) == 0 and t["lock_on"] > 0
-        for t in threats
-    )
-    draw_sector_wheel(screen_surf, user_heading_deg, active_sectors, locked_on)
+    draw_forward_cone(screen_surf, user_heading_deg, threats)
 
     draw_animations(screen_surf)
     pygame.draw.circle(screen_surf, (255, 255, 255), CENTER, 20)
