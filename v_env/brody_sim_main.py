@@ -43,6 +43,8 @@ RANGE_RINGS_M = [100, 200, 300, 400, 500]
 SPIRAL_OMEGA        = 0.2    # rad/s — angular drift rate for spiral threats
 SPIRAL_RADIAL_SPEED = 10     # px/s  — inward speed for spiral threats
 
+WAVE_CLEAR_DELAY = 3.0       # seconds between a wave being cleared and the next spawning
+
 # Wave schedule (Ashlynn's).
 # spawn_time: seconds after SPACE pressed. Wave 1 at T=3 gives a natural countdown.
 # angle_deg: compass bearing FROM WHICH the threat approaches (0=N, 90=E, …).
@@ -117,6 +119,7 @@ current_wave_num  = 0
 misses            = 0
 neutralized_count = 0
 wave_notification = None
+next_wave_timer   = None     # counts down after a wave clears before spawning the next
 user_heading_deg  = 0.0
 
 # ─── PYGAME INIT ─────────────────────────────────────────────────────────────
@@ -305,7 +308,7 @@ def terminal_hit(threat):
 def reset_game():
     global state, game_time, threats, animations, screen_flash
     global next_threat_id, waves_spawned, current_wave_num
-    global misses, neutralized_count, wave_notification
+    global misses, neutralized_count, wave_notification, next_wave_timer
     state             = STATE_INTRO
     game_time         = 0.0
     screen_flash      = None
@@ -315,6 +318,7 @@ def reset_game():
     misses            = 0
     neutralized_count = 0
     wave_notification = None
+    next_wave_timer   = None
     threats.clear()
     animations.clear()
 
@@ -461,6 +465,11 @@ def draw_countdown(surf, seconds_remaining):
     surf.blit(text, (WIDTH  // 2 - text.get_width()  // 2,
                      HEIGHT // 2 + SECTOR_OUTER_RADIUS + 20))
 
+def draw_between_wave_countdown(surf, seconds_remaining):
+    text = font_med.render(f"Next wave in {math.ceil(seconds_remaining)}...", True, (180, 180, 180))
+    surf.blit(text, (WIDTH  // 2 - text.get_width()  // 2,
+                     HEIGHT // 2 + SECTOR_OUTER_RADIUS + 20))
+
 def draw_intro(surf):
     overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
     overlay.fill((0, 0, 0, 185))
@@ -546,16 +555,28 @@ while running:
                 user_heading_deg += 90 * dt
             user_heading_deg %= 360
 
-        # Wave spawning on fixed timer
-        while waves_spawned < len(WAVE_SCHEDULE):
-            wave = WAVE_SCHEDULE[waves_spawned]
-            if game_time < wave["spawn_time"]:
-                break
+        # Wave 1: spawn after the initial 3-second countdown
+        if waves_spawned == 0 and game_time >= WAVE_SCHEDULE[0]["spawn_time"]:
+            wave = WAVE_SCHEDULE[0]
             for tmpl in wave["threats"]:
-                spawn_threat(tmpl, waves_spawned)
-            current_wave_num  = waves_spawned + 1
+                spawn_threat(tmpl, 0)
+            current_wave_num  = 1
             wave_notification = {"label": wave["label"], "timer": 2.0}
-            waves_spawned    += 1
+            waves_spawned     = 1
+
+        # Waves 2-4: only spawn once all previous threats are cleared
+        elif 0 < waves_spawned < len(WAVE_SCHEDULE) and not threats:
+            if next_wave_timer is None:
+                next_wave_timer = WAVE_CLEAR_DELAY   # start countdown
+            next_wave_timer -= dt
+            if next_wave_timer <= 0:
+                next_wave_timer = None
+                wave = WAVE_SCHEDULE[waves_spawned]
+                for tmpl in wave["threats"]:
+                    spawn_threat(tmpl, waves_spawned)
+                current_wave_num  = waves_spawned + 1
+                wave_notification = {"label": wave["label"], "timer": 2.0}
+                waves_spawned    += 1
 
         if wave_notification:
             wave_notification["timer"] -= dt
@@ -623,10 +644,13 @@ while running:
     draw_hud(screen_surf)
     draw_wave_notification(screen_surf)
 
-    if state == STATE_PLAYING and waves_spawned == 0:
-        remaining = WAVE_SCHEDULE[0]["spawn_time"] - game_time
-        if remaining > 0:
-            draw_countdown(screen_surf, remaining)
+    if state == STATE_PLAYING:
+        if waves_spawned == 0:
+            remaining = WAVE_SCHEDULE[0]["spawn_time"] - game_time
+            if remaining > 0:
+                draw_countdown(screen_surf, remaining)
+        elif next_wave_timer is not None:
+            draw_between_wave_countdown(screen_surf, next_wave_timer)
 
     if state == STATE_INTRO:
         draw_intro(screen_surf)
