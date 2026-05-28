@@ -30,7 +30,7 @@ void HapticBelt::loop() {
     // Convert to Euler Yaw
     float siny_cosp = 2.0f * (orientation.w * orientation.z + orientation.x * orientation.y);
     float cosy_cosp = 1.0f - 2.0f * (orientation.y * orientation.y + orientation.z * orientation.z);
-    float yaw = atan2(siny_cosp, cosy_cosp) * 180.0f / M_PI;
+    float yaw = -atan2(siny_cosp, cosy_cosp) * 180.0f / M_PI;  // negate to match compass convention (clockwise positive)
     
     // Parse received string threats
     ThreatTrack.update();
