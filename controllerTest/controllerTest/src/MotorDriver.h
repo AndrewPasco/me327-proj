@@ -15,8 +15,9 @@ private:
     static const int MOTOR_COUNT = 8;
     static const int PWM_FREQUENCY = 500;
     // Real Argon pins
-    const int motorPins[8] = {D5, D4, D8, D6, A1, A2, A4, A5};
+    const int motorPins[8] = {D5, A5, A4, A2, A1, D6, D8, D4};
 };
+
 // 1   4    3   5   6   7   8  2  
 // A1, A2, A4, A5, D4, D5, D6, D8
 

@@ -62,15 +62,16 @@ void HapticBelt::renderHaptics(float currentRelativeYaw) {
     motorDriver.stopAllMotors();
     
     float sectorSize = 360.0f / 8.0f;
-    
+
+
     for (int i = 0; i < count; i++) {
         float x = activeThreats[i]->coords[0];
         float y = activeThreats[i]->coords[1];
         
         // +x is right, +y is up (forward in python GUI)
         // atan2(x,y) gives 0 for y-axis, positive for x-axis -> maps to azimuth
-        float targetAzimuth = atan2(y, x) * 180.0f / M_PI - 90.0f;
-        
+        float targetAzimuth = -(atan2(y, x) * 180.0f / M_PI - 90.0f);
+        Serial.println(targetAzimuth);
         float error = targetAzimuth - currentRelativeYaw;
         error = fmod(error + 540.0f, 360.0f) - 180.0f; 
 
