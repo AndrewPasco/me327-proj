@@ -41,7 +41,7 @@ SECTOR_OUTER_RADIUS = 300
 RANGE_RINGS_M = [100, 200, 300, 400, 500]
 
 SPIRAL_OMEGA        = 0.2    # rad/s — angular drift rate for spiral threats
-SPIRAL_RADIAL_SPEED = 18     # px/s  — inward speed for spiral threats
+SPIRAL_RADIAL_SPEED = 10     # px/s  — inward speed for spiral threats
 
 # Wave schedule (Ashlynn's).
 # spawn_time: seconds after SPACE pressed. Wave 1 at T=3 gives a natural countdown.
@@ -51,38 +51,34 @@ WAVE_SCHEDULE = [
         "spawn_time": 3.0,
         "label": "WAVE 1",
         "threats": [
-            {"angle_deg":   0, "speed_mps": 16, "distance_m": 400},
-            {"angle_deg": 175, "speed_mps": 16, "distance_m": 400},
+            {"angle_deg":   0, "speed_mps": 10, "distance_m": 400},
+            {"angle_deg": 175, "speed_mps": 10, "distance_m": 400},
         ],
     },
     {
-        "spawn_time": 12.0,
+        "spawn_time": 18.0,
         "label": "WAVE 2",
         "threats": [
-            {"angle_deg":  45, "speed_mps": 19, "distance_m": 500},
-            {"angle_deg": 180, "speed_mps": 19, "distance_m": 500},
-            {"angle_deg": 315, "speed_mps": 19, "distance_m": 500},
+            {"angle_deg":  45, "speed_mps": 12, "distance_m": 500},
+            {"angle_deg": 225, "speed_mps": 12, "distance_m": 500},
         ],
     },
     {
-        "spawn_time": 21.0,
+        "spawn_time": 33.0,
         "label": "WAVE 3",
         "threats": [
-            {"angle_deg":  30, "speed_mps": 22, "distance_m": 500},
-            {"angle_deg": 120, "speed_mps": 22, "distance_m": 500},
-            {"angle_deg": 240, "speed_mps": 22, "distance_m": 500},
-            {"angle_deg": 330, "speed_mps": 22, "distance_m": 500},
+            {"angle_deg":  30, "speed_mps": 14, "distance_m": 500},
+            {"angle_deg": 160, "speed_mps": 14, "distance_m": 500},
+            {"angle_deg": 290, "speed_mps": 14, "distance_m": 500},
         ],
     },
     {
-        "spawn_time": 30.0,
+        "spawn_time": 48.0,
         "label": "WAVE 4",
         "threats": [
-            {"angle_deg":  10, "speed_mps": 25, "distance_m": 500},
-            {"angle_deg":  82, "speed_mps": 25, "distance_m": 500},
-            {"angle_deg": 154, "speed_mps": 25, "distance_m": 500},
-            {"angle_deg": 226, "speed_mps": 25, "distance_m": 500},
-            {"angle_deg": 298, "speed_mps": 25, "distance_m": 500},
+            {"angle_deg":  10, "speed_mps": 16, "distance_m": 500},
+            {"angle_deg": 130, "speed_mps": 16, "distance_m": 500},
+            {"angle_deg": 250, "speed_mps": 16, "distance_m": 500},
         ],
     },
 ]
