@@ -23,27 +23,47 @@ As the operator turns, the vibration pattern rotates with them — always pointi
 
 ```
 me327-proj/
-├── controllerTest/                  # Firmware project root
-│   ├── controllerTest/              # Particle Workbench project
-│   │   ├── src/                     # All firmware source
-│   │   │   ├── controllerTest.cpp   # Entry point (setup / loop)
-│   │   │   ├── HapticBelt.h/.cpp    # Top-level orchestrator
-│   │   │   ├── BeltBLE.h/.cpp       # BLE peripheral (Rx threats / Tx orientation)
-│   │   │   ├── BeltIMU.h/.cpp       # IMU interface + quaternion math
-│   │   │   ├── ThreatTracker.h/.cpp # Threat state machine (parse + store)
-│   │   │   └── MotorDriver.h/.cpp   # PWM abstraction for 8 ERM motors
-│   │   ├── lib/                     # Vendored libraries
+├── Analysis/                          # Vibration analysis
+│   └── Analysis.m                     # MATLAB 2-DOF housing vibration model
+├── CAD/                               # 3D-printed housing and belt buckle STL files
+├── belt_controller/                   # Earlier prototype firmware (reference)
+├── controllerTest/                    # Firmware + host BLE utilities
+│   ├── controllerTest/                # Particle Workbench project
+│   │   ├── src/                       # All firmware source
+│   │   │   ├── controllerTest.cpp     # Entry point (setup / loop)
+│   │   │   ├── HapticBelt.h/.cpp      # Top-level orchestrator
+│   │   │   ├── BeltBLE.h/.cpp         # BLE peripheral (Rx threats / Tx orientation)
+│   │   │   ├── BeltIMU.h/.cpp         # IMU interface + quaternion math
+│   │   │   ├── ThreatTracker.h/.cpp   # Threat state machine (parse + store)
+│   │   │   ├── HapticSignature.h      # Temporal vibration patterns per threat
+│   │   │   └── MotorDriver.h/.cpp     # PWM abstraction for 8 ERM motors
+│   │   ├── lib/                       # Vendored libraries
 │   │   │   ├── Adafruit_BNO08x_Sahagun/
 │   │   │   ├── Adafruit_BusIO_Sahagun/
 │   │   │   └── Adafruit_Unified_Sensor_Sahagun/
-│   │   └── project.properties       # Particle project config + dependencies
-│   ├── bleakListener.py             # Host: receive orientation from belt (debug)
-│   ├── bleakScanAndListen           # Host: scan + connect by device name
-│   ├── bleakScanner                 # Host: passive BLE scanner
-│   └── serialListener.py            # Host: USB Serial monitor
-├── belt_controller/                 # Earlier prototype firmware (reference)
-├── architecture.md                  # Detailed design and architecture document
-└── README.md                        # This file
+│   │   └── project.properties         # Particle project config + dependencies
+│   ├── bleakListener.py               # Host: receive orientation from belt (debug)
+│   ├── bleakScanAndListen             # Host: scan + connect by device name
+│   ├── bleakScanner                   # Host: passive BLE scanner
+│   └── serialListener.py              # Host: USB Serial monitor
+├── docs/                              # Design notes and project documentation checkpoints
+├── media/                             # Visual assets for the project documentation
+├── v_env/                             # Host-side GUI & threat simulation scripts
+│   ├── brody_sim_main.py              # Main demo simulation (waves + spiral threats)
+│   ├── gui_ashlynn_sim.py             # Game-mode simulation (4 escalating waves)
+│   ├── gui_update_on_event.py         # Interactive debug / intro GUI (click-to-place)
+│   ├── gui_drag_and_drop.py           # Drag-and-drop threat placement
+│   ├── gui_single.py                  # Single-threat GUI
+│   ├── gui_mult.py                    # Multi-threat GUI
+│   ├── gui_varforce.py                # Variable-force multi-threat GUI
+│   ├── gui_update_continously.py      # Continuous-update visualization
+│   ├── update_on_event_brody_simulation.py      # BLE simulation + mouse test
+│   ├── update_on_event_brody_simulation_TEST.py # Test variant of above
+│   ├── pyproject.toml                 # Python project configuration
+│   └── uv.lock                        # Lockfile for Python dependencies
+├── architecture.md                    # Detailed design and architecture document
+├── LICENSE                            # MIT License
+└── README.md                          # This file
 ```
 
 ---
@@ -63,8 +83,14 @@ me327-proj/
 | Resource | Pins |
 | :--- | :--- |
 | IMU (I2C) | SDA / SCL (default bus) |
-| Motors 0–3 | A1, A2, A4, A5 |
-| Motors 4–7 | D4, D5, D6, D8 |
+| Motor 0 (forward) | D5 |
+| Motor 1 | A5 |
+| Motor 2 | A4 |
+| Motor 3 | A2 |
+| Motor 4 | A1 |
+| Motor 5 | D6 |
+| Motor 6 | D8 |
+| Motor 7 | D4 |
 | Status LED | D7 (onboard) |
 
 ---
@@ -93,9 +119,12 @@ See [`architecture.md`](architecture.md) for the full design document. In brief:
 | BLE | `BeltBLE` | GATT peripheral; Rx threat packets, Tx orientation quaternion |
 | IMU | `BeltIMU` | BNO085 driver; quaternion re-orientation, reset recovery |
 | Threat State | `ThreatTracker` | Parses BLE packets; maintains up to 10 active threats |
+| Haptic Signatures | `HapticSignature` | Temporal vibration patterns (on/off timing) per threat for tactile differentiation |
 | Motors | `MotorDriver` | PWM abstraction for 8 ERMs at 500 Hz |
 
 ### BLE Protocol
+
+The belt advertises as **`"Argon Test"`** over BLE with service UUID `62c3cf89-247b-4c0f-a70d-651080844609`.
 
 **Host → Belt (Rx characteristic `...844609`)**
 
@@ -103,7 +132,7 @@ Semicolon-separated threat packets, UTF-8 encoded:
 ```
 "<id>,<x>,<y>,<z>[;<id>,<x>,<y>,<z>;...]"
 ```
-- `id`: integer threat identifier
+- `id`: integer threat identifier (0–9; each slot has a unique haptic signature)
 - `x`, `y`: position in the host's local frame (meters or arbitrary units; `+x` = right, `+y` = forward)
 - `z`: depth / altitude — set to `-1` to **remove** a threat
 
@@ -118,7 +147,9 @@ Orientation quaternion, sent as a comma-separated string each loop:
 
 ## Host-Side Python Tools
 
-All scripts are in `controllerTest/`. Dependencies managed with `uv`.
+### BLE Debug Utilities
+
+Located in `controllerTest/`. Dependencies managed with `uv`.
 
 ```bash
 # Install dependencies
@@ -138,6 +169,27 @@ uv run serialListener.py
 > **Device MAC address** is printed over USB Serial at boot:  
 > `BLE MAC: XX:XX:XX:XX:XX:XX`  
 > Update `DEVICE_MAC` in the Python scripts accordingly.
+
+### Simulation & GUI
+
+Located in `v_env/`. Requires `pygame` and `bleak`.
+
+| Script | Purpose |
+| :--- | :--- |
+| `brody_sim_main.py` | **Main demo simulation.** Spiral threats approach across escalating waves; merges Ashlynn's wave logic with Brody's UI. Used during the live demo. |
+| `gui_update_on_event.py` | **Interactive debug / intro tool.** Click to place threats, drag to reposition, right-click to remove. Sector wheel visualization shows motor mapping. Good for introducing a user to the system. |
+| `gui_ashlynn_sim.py` | Game-mode simulation with 4 escalating waves and lock-on neutralization mechanic. |
+| `gui_drag_and_drop.py` | Simple drag-and-drop threat placement GUI. |
+| `gui_single.py` | Single-threat GUI with BLE. |
+| `gui_mult.py` | Multi-threat GUI with BLE. |
+| `gui_varforce.py` | Multi-threat with variable force GUI. |
+| `gui_update_continously.py` | Continuous-update threat visualization with sector wheel. |
+
+All simulation scripts connect to the belt automatically by scanning for a device named `"Argon"`.
+
+**Controls (simulation scripts):**
+- `SPACE` — start / restart simulation
+- `← →` arrow keys — rotate heading manually (when BLE is not connected)
 
 ---
 
@@ -165,10 +217,20 @@ The IMU module also handles sensor resets transparently: it computes a continuit
 Motor index 0 corresponds to "forward" (front of the belt). Motors are numbered 0–7 clockwise when viewed from above.
 
 For each active threat:
-1. Compute target azimuth: `atan2(x, y)` — 0° = forward, positive = rightward
-2. Subtract current yaw to get relative bearing
+1. Compute target azimuth: `-(atan2(y, x) × 180/π − 90°)` — converts from standard math to compass convention (0° = forward, clockwise positive)
+2. Subtract current yaw to get relative bearing, normalized to (−180°, +180°]
 3. Map bearing to nearest motor index (45° sectors)
 4. Scale intensity: `intensity = clamp(1 − range/400, 0.1, 1.0)`
+
+Each threat slot (0–9) is assigned a unique **haptic signature** — a temporal on/off vibration pattern defined in `HapticSignature`. This allows the operator to distinguish between multiple simultaneous threats by feel. The motor only fires when the threat's signature is in its "active" phase.
+
+---
+
+## Analysis & Simulation
+
+We also model the mechanical dynamics of the belt for design optimization:
+
+**`Analysis/Analysis.m`** (MATLAB) — 2-DOF mass-spring-damper model comparing vibration response of an unconstrained belt vs. a belt worn on a person. Models ERM forcing and housing dynamics.
 
 ---
 

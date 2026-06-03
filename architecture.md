@@ -51,6 +51,7 @@ HapticBelt          (top-level orchestrator)
 ├── BeltBLE         (BLE peripheral: Rx threat data, Tx orientation)
 ├── BeltIMU         (I2C IMU interface: quaternion + heading)
 ├── ThreatTracker   (parses BLE packets, maintains threat state)
+│   └── HapticSignature  (temporal vibration pattern per threat)
 └── MotorDriver     (PWM abstraction for 8 ERM motors)
 ```
 
@@ -59,8 +60,9 @@ HapticBelt          (top-level orchestrator)
 | **HapticBelt** | `HapticBelt.h/.cpp` | Top-level orchestrator. Owns all subsystems. Calls `setup()` and `loop()`. Pulls quaternion from `BeltIMU`, converts to yaw, queries active threats from `ThreatTracker`, maps threats to motors, and transmits orientation back over BLE via `BeltBLE`. |
 | **BeltBLE** | `BeltBLE.h/.cpp` | Manages the BLE peripheral. Registers custom GATT service with Rx (write-without-response) and Tx (notify) characteristics. Passes a callback+context to the Rx characteristic on setup. Provides `transmit_orientation(w,x,y,z)` to broadcast the current quaternion. |
 | **BeltIMU** | `BeltIMU.h/.cpp` | Interfaces with the BNO085 via I2C. Applies an initial re-orientation quaternion at startup. Handles IMU resets by computing a continuity-preserving offset quaternion. Exposes `get_quaternion()` (relative to initial orientation) and `get_heading()` (yaw in degrees). |
-| **ThreatTracker** | `ThreatTracker.h/.cpp` | Holds a fixed-size array of up to 10 `Threat` structs. Provides a static `rx_callback` (passed to `BeltBLE::setup`) that stores incoming BLE bytes behind a `Mutex`. `update()` parses the buffered string and adds/updates/removes threats. `getActiveThreats()` returns pointers to currently active threats. |
-| **MotorDriver** | `MotorDriver.h/.cpp` | Abstracts PWM control for 8 motors at 500 Hz. Maps motor index 0–7 to Argon pins `{A1, A2, A4, A5, D4, D5, D6, D8}`. `triggerMotor(index, intensity)` writes a 0–255 PWM value; `stopAllMotors()` zeroes all channels. |
+| **ThreatTracker** | `ThreatTracker.h/.cpp` | Holds a fixed-size array of up to 10 `Threat` structs. Provides a static `rx_callback` (passed to `BeltBLE::setup`) that stores incoming BLE bytes behind a `Mutex`. `update()` parses the buffered string and adds/updates/removes threats. `getActiveThreats()` returns pointers to currently active threats. Each threat slot is pre-assigned a unique `HapticSignature` at construction. |
+| **HapticSignature** | `HapticSignature.h` | Defines a temporal on/off vibration pattern via an array of switch times (milliseconds). `is_active()` returns whether the motor should fire at the current time, cycling through the pattern. A zero-length signature is always on. Up to 10 entries per pattern (`MAX_SIGNATURE_LENGTH = 10`). |
+| **MotorDriver** | `MotorDriver.h/.cpp` | Abstracts PWM control for 8 motors at 500 Hz. Maps motor index 0–7 to Argon pins `{D5, A5, A4, A2, A1, D6, D8, D4}`. `triggerMotor(index, intensity)` writes a 0–255 PWM value; `stopAllMotors()` zeroes all channels. |
 
 #### 3. Key Data Structures
 
@@ -75,11 +77,19 @@ Quat Qconj(const Quat& q);                     // Quaternion conjugate
 Quat Qnormalize(Quat q);                        // Unit normalization
 void printQuat(Quat q);                          // Serial debug print
 
+// HapticSignature.h
+class HapticSignature {
+    unsigned long switchTimes[MAX_SIGNATURE_LENGTH]; // on/off durations (ms)
+    size_t length;                                   // 0 = always on
+    bool is_active();  // returns current on/off state, cycling through pattern
+};
+
 // ThreatTracker.h
 struct Threat {
     int   id     = -1;
     bool  active = false;
-    float coords[3] = {0, 0, 0}; // x, y, z in host coordinate frame
+    float coords[3] = {0, 0, 0};  // x, y, z in host coordinate frame
+    HapticSignature signature;     // unique temporal vibration pattern
 };
 ```
 
@@ -105,7 +115,7 @@ loop() [runs continuously]:
            → applies continuity offset → returns finalQuat
 
   3. Convert quaternion → yaw (degrees) via standard Euler decomposition:
-        yaw = atan2(2(w·z + x·y), 1 − 2(y² + z²)) × 180/π
+        yaw = -atan2(2(w·z + x·y), 1 − 2(y² + z²)) × 180/π   // negated for compass convention
 
   4. ThreatTracker::update()
         └─ safely copies buffered byteString (Mutex-protected)
@@ -115,13 +125,14 @@ loop() [runs continuously]:
   5. HapticBelt::renderHaptics(yaw)
         a. getActiveThreats() → list of active Threat*
         b. For each threat:
-             targetAzimuth = atan2(x, y) × 180/π   // +x right, +y forward
-             error = targetAzimuth − yaw             // relative bearing to threat
+             targetAzimuth = -(atan2(y, x) × 180/π − 90°)  // compass convention
+             error = targetAzimuth − yaw                     // relative bearing
              error normalized to (−180, +180]
              motorIndex = round(normalizeAngle(error) / 45°) mod 8
              range = √(x² + y²)
              intensity = clamp(1 − range/400, 0.1, 1.0)
-             MotorDriver::triggerMotor(motorIndex, intensity)
+             if threat.signature.is_active():                // haptic signature gating
+                 MotorDriver::triggerMotor(motorIndex, intensity)
 
   6. BeltBLE::transmit_orientation(w, x, y, z)
         └─ formats as "w,x,y,z" string → Tx NOTIFY characteristic
@@ -139,8 +150,14 @@ loop() [runs continuously]:
 | Resource | Pin(s) | Notes |
 | :--- | :--- | :--- |
 | **IMU (I2C)** | SDA / SCL (default I2C bus) | BNO085 via `Adafruit_BNO08x` |
-| **Motors 0–3** | A1, A2, A4, A5 | DRV8833 PWM inputs |
-| **Motors 4–7** | D4, D5, D6, D8 | DRV8833 PWM inputs |
+| **Motor 0 (forward)** | D5 | DRV8833 PWM input |
+| **Motor 1** | A5 | DRV8833 PWM input |
+| **Motor 2** | A4 | DRV8833 PWM input |
+| **Motor 3** | A2 | DRV8833 PWM input |
+| **Motor 4** | A1 | DRV8833 PWM input |
+| **Motor 5** | D6 | DRV8833 PWM input |
+| **Motor 6** | D8 | DRV8833 PWM input |
+| **Motor 7** | D4 | DRV8833 PWM input |
 | **Status LED** | D7 (onboard) | Blink each loop iteration |
 | **PWM Frequency** | 500 Hz | Set via `analogWrite(pin, 0, 500)` in `MotorDriver::setup()` |
 
@@ -160,7 +177,9 @@ Dependencies are declared in `controllerTest/project.properties` and bundled und
 
 ### Host-Side Tooling (Python)
 
-Located in `controllerTest/` (project root):
+#### BLE Debug Utilities
+
+Located in `controllerTest/`:
 
 | Script | Purpose |
 | :--- | :--- |
@@ -169,4 +188,21 @@ Located in `controllerTest/` (project root):
 | `bleakScanner` | Passive BLE scanner utility. |
 | `serialListener.py` | Reads USB Serial output from the Argon for local debug without BLE. |
 
-All Python scripts use `bleak` for BLE communication. Run with `uv run <script>` after adding `bleak` to the project via `uv add bleak`.
+Dependencies managed with `uv`. Run with `uv run <script>` after adding `bleak` via `uv add bleak`.
+
+#### Simulation & GUI
+
+Located in `v_env/`. Requires `pygame` and `bleak`.
+
+| Script | Purpose |
+| :--- | :--- |
+| `brody_sim_main.py` | **Main demo simulation.** Spiral threats approach across escalating waves; merges Ashlynn's wave logic with Brody's UI. Used during the live demo. |
+| `gui_update_on_event.py` | **Interactive debug / intro tool.** Click to place threats, drag to reposition, right-click to remove. Sector wheel visualization shows motor mapping in real time. |
+| `gui_ashlynn_sim.py` | Game-mode simulation with 4 escalating waves and lock-on neutralization mechanic. |
+| `gui_drag_and_drop.py` | Simple drag-and-drop threat placement GUI. |
+| `gui_single.py` | Single-threat GUI with BLE. |
+| `gui_mult.py` | Multi-threat GUI with BLE. |
+| `gui_varforce.py` | Multi-threat with variable force GUI. |
+| `gui_update_continously.py` | Continuous-update threat visualization with sector wheel. |
+
+All simulation scripts auto-connect to the belt by scanning for a device named `"Argon"`. Controls: `SPACE` to start/restart, `← →` arrow keys to rotate heading manually (when BLE is not connected).
